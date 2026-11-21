@@ -14,8 +14,8 @@
     <artifactId>cloudsim-gpu</artifactId>
     <name>cloudsim-gpu</name>
     <description>L1 GPU layer: GPU servers, GPU guests, training jobs and their progress.
-        Package gpu.api is the contract with the co-scheduling framework; gpu.stub is a
-        minimal stand-in until the real GPU layer lands.</description>
+        Package gpu.api is the contract with the co-scheduling framework; package gpu
+        implements it on CloudSim 7G.</description>
 
     <dependencies>
         <dependency>

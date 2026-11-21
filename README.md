@@ -14,7 +14,7 @@ Training jobs need CPU cores to decode and prepare data for the GPU. Most schedu
 |---|---|
 | `modules/cloudsim` | CloudSim 7G core (unchanged) |
 | `modules/cloudsim-examples` | CloudSim examples (unchanged) |
-| `modules/cloudsim-gpu` | GPU layer: `gpu.api`, the contract with the scheduler, and its implementations |
+| `modules/cloudsim-gpu` | GPU layer: `gpu.api`, the contract with the scheduler, and its CloudSim implementation (`gpu`) |
 | `modules/cloudsim-cosched` | Co-scheduling framework: core types, performance models, workload, scheduling pipeline, metrics |
 | `modules/Check*.java` | Check 1 feasibility prototypes, kept as a historical record |
 | `reports/` | One LaTeX report per implementation phase |
@@ -42,7 +42,7 @@ mvn install          # builds every module and runs all tests
 |---|---|---|
 | 0 | Maven modules, dependencies | Done |
 | 1a | Core types, `gpu.api` contract, stub GPU layer | Done ([report](reports/phase-0-1a-foundations.tex)) |
-| 1b | Real GPU layer | In progress |
+| 1b | Real GPU layer: gang-allocated GPUs, work-based progress, power | Done ([report](reports/phase-1b-gpu-layer.tex)) |
 | 1c | Formats, loaders, L2 models, Synergy profile converter | Planned |
 | 2 | Vertical slice: FIFO, GPU-proportional, one trace end to end | Planned |
 | 3 | Synergy Greedy / Tune, round-based lifecycle | Planned |

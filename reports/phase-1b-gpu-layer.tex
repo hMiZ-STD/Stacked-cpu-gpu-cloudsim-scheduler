@@ -1,0 +1,296 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+\lstset{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  breaklines=true,
+  frame=single,
+  framerule=0.3pt,
+  rulecolor=\color{black!30},
+  backgroundcolor=\color{black!3},
+  keywordstyle=\color{blue!60!black}\bfseries,
+  commentstyle=\color{black!55}\itshape,
+  showstringspaces=false
+}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{CPU--GPU Co-Scheduling Module for CloudSim 7G\\[4pt]
+\large Phase 1b Report: The GPU Layer (L1)}
+\author{Chirag}
+\date{21 November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Phase 1b builds the real GPU layer (L1) on CloudSim 7G and retires the stand-in written in Phase 1a.
+The layer models GPU servers with gang-allocated whole GPUs, fractional CPU cores and memory, one
+isolated guest per job part, training progress tracked directly in iterations, and server power from
+CPU, GPUs and base load. Two timing problems in the earlier design were found and fixed: a wake-up
+the CloudSim datacenter silently ignores, which made a sped-up job finish five times too late in a
+test, and an ordering problem between a grow and a shrink on the same server in one round. The
+randomized lock-step test from Check~1 now finishes 300 jobs with a worst error of 0.000000\,s
+(Check~1: 0.037\,s). All 209 tests in the project pass.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Context and change of plan}
+%======================================================================
+
+The architecture assigned L1 to a teammate. In Phase~1a the contract between the scheduler and the
+GPU layer (package \code{gpu.api}) was written together with a stub implementation, so the
+scheduler could be developed first. On 21~November~2026 the author took over L1 as well. This
+phase therefore implements L1 in full, in package \code{org.cloudbus.cloudsim.gpu} as named in the
+architecture document, and removes the stub.
+
+%======================================================================
+\section{Design}
+%======================================================================
+
+\subsection{What the GPU layer does and does not decide}
+The scheduler (L4) decides every job's servers, GPUs, cores, memory and speed. The GPU layer only
+carries the decision out and reports state. In particular it never computes throughput: each
+command carries the job's \emph{rate} in iterations per second, already including throughput and
+the locality penalty. This is the ``rate-to-speed split'' agreed in Check~3.
+
+\subsection{Classes}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Class & Role \\
+\midrule
+\code{CloudSimGpuLayer} & Entry point (\code{GpuLayer}): builds one datacenter with one host per
+  server, binds the executor to the broker, reports server status. \\
+\code{GpuHost} & A server. Extends CloudSim's \code{PowerHost}. Holds a \code{GpuProvisioner},
+  tracks cores and memory, enforces reservations, computes power. \\
+\code{Gpu} & One whole, exclusive GPU: index, type, socket (NUMA hook, always 0), owner, busy fraction. \\
+\code{GpuProvisioner} & Gang allocation: all requested GPUs at once, lowest-numbered first, or none. \\
+\code{GpuVm} & The guest of one job part on one server (GPU passthrough isolation). \\
+\code{TrainingCloudlet} & A part's work in iterations, as a \code{double}. \\
+\code{GpuCloudletScheduler} & Advances work at the job's rate; ignores CloudSim's MIPS shares. \\
+\code{TrainingJob} & A running job: its parts, which move in lock-step at one rate. \\
+\code{GpuPlanExecutor} & Applies a round's commands (\code{Start}, \code{Resize}, \code{Stop}). \\
+\code{LinearPowerModel} & $P(u) = P_\text{idle} + (P_\text{max} - P_\text{idle})\,u$, on at $u = 0$. \\
+\code{PlannedGuestAllocationPolicy} & ``Do as told'' placement: a guest goes where the plan says or is refused. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Progress in iterations, not MIPS}
+CloudSim measures cloudlet work in integer millions of instructions and speed in MIPS shared by a
+VM scheduler. The stub encoded speed as MIPS with a scale factor, which rounds work to integers and
+ties speed to CPU shares that have no meaning for a GPU job. The architecture's fallback for this
+case was ``track work directly in \code{GpuCloudletScheduler}'', and that is what the real layer does:
+
+\begin{itemize}
+  \item Each \code{TrainingCloudlet} holds its remaining work as a \code{double}.
+  \item \code{GpuCloudletScheduler} keeps the job's rate $r$. On every update at time $t$ it subtracts
+        $r\,(t - t_\text{prev})$ and predicts the finish at $t + \text{remaining}/r$.
+  \item A rate change goes through \code{setRate(now, r')}, which first credits progress at the old
+        rate. Contract rule~1 (credit before any change) is therefore enforced inside the scheduler.
+  \item A cloudlet within $10^{-6}$\,s of done counts as done, absorbing floating-point noise at an
+        exact finish event.
+\end{itemize}
+
+CloudSim's MIPS, RAM and bandwidth accounting is kept nominal (every guest asks for 1 unit) so it
+never limits a job. The real resources are counted by \code{GpuHost}.
+
+\subsection{Reservations happen when a command is applied}
+CloudSim creates and destroys guests through events processed after the broker's turn. If GPUs,
+cores and memory were taken at that point, a round that stops job~A and grows job~B on the same
+server would see A's resources still held when B grows (A's destroy is still queued) and wrongly
+report the server as full. The layer therefore reserves resources on \code{GpuHost} synchronously
+when the executor applies a command. CloudSim's later creation event only carries the guest, and the
+host accepts only guests that hold a reservation on it (contract rule~4).
+
+\subsection{Applying a round in phases}
+Within one \code{apply} call the executor works in three phases, so the order in which commands are
+listed never matters:
+
+\begin{enumerate}
+  \item \textbf{Credit} all running jobs' progress at their old rates.
+  \item \textbf{Release}: stops; moves (a resize to other servers or another GPU count is a stop
+        followed by a start with the remaining work); and the old cores and memory of every
+        in-place resize (the guest keeps its GPUs).
+  \item \textbf{Reserve}: the new cores and memory of in-place resizes, then all starts.
+\end{enumerate}
+
+Phase~1a released and re-reserved each in-place resize one at a time. That fails when, on one
+server with 24 cores, job~2 grows from 6 to 18 cores and is listed before job~1 shrinks from 18 to
+6: the grow is checked while job~1 still holds 18 cores. The plan is feasible, but the order made it
+look infeasible. Splitting \code{GpuHost}'s resize into \code{releaseCoresAndMemory} and
+\code{reserveCoresAndMemory}, called in separate phases, fixes this. A test covers exactly this case.
+
+\subsection{Waking the datacenter at the right time}
+After a speed change, CloudSim's datacenter must recompute when the next cloudlet finishes (contract
+rule~3). Phase~1a sent a ``wake now'' event. Reading \code{Datacenter.updateCloudletProcessing}
+shows that the datacenter ignores an update requested within \code{minTimeBetweenEvents} (0.01\,s)
+of its previous one:
+
+\begin{lstlisting}[language=Java]
+if (CloudSim.clock() < 0.111 ||
+    CloudSim.clock() >= getLastProcessTime() + CloudSim.getMinTimeBetweenEvents()) { ... }
+\end{lstlisting}
+
+That is exactly the situation in event-driven scheduling, where a round runs at the moment a job
+finishes and the datacenter has just processed that finish. The wake is dropped, and the only event
+left is the one predicted from the old, slower rate. A new contract test reproduces it: job~1 ends at
+100\,s and job~2 is sped up tenfold at the same instant. Job~2 should finish at 190\,s; under the
+stub it finished at \textbf{1000\,s}.
+
+\textbf{Fix.} After applying a round, the real executor schedules a datacenter update at each
+started or resized job's new predicted finish time. That event is not within 0.01\,s of the
+previous update, so it is processed, and the job finishes on time. Stale updates from earlier
+predictions only cause harmless recomputations.
+
+\paragraph{Remaining resolution limit.} The datacenter never schedules its next update sooner than
+0.02\,s after the current one. Two jobs finishing less than 0.02\,s apart can have the second
+reported up to 0.02\,s late. This is CloudSim's own time resolution. For jobs that run for hours it
+is negligible, and it is stated here rather than worked around.
+
+\subsection{Spread jobs}
+A job over $k$ servers has $k$ guests. Each part's cloudlet holds the job's full remaining work and
+runs at the job's rate, so all parts finish in the same datacenter update. The job ends, and the
+listener is called, once the last part returns.
+
+\subsection{Power}
+Server power at any moment is
+\[
+  P = P_\text{CPU}(u_\text{CPU}) + \sum_{\text{GPUs}} P_\text{GPU}(u_\text{GPU}) + P_\text{base},
+\]
+with $u_\text{CPU}$ the allocated share of cores (allocated cores are assumed fully busy) and
+$u_\text{GPU}$ each GPU's busy fraction. Commands carry a job's GPU busy fraction,
+$\text{throughput}(c)/\text{throughput}(c^*)$, computed by the scheduler from the profiles. For
+example, ResNet-18 at the fixed share runs at $1/2.4$ of full speed, so its GPUs are busy about
+42\% of the time. Unallocated GPUs draw idle power: idle servers stay on.
+
+\begin{itemize}
+  \item The CPU model is either linear or one of CloudSim's SPECpower tables, chosen by class name.
+  \item CloudSim's own \code{PowerModelLinear} returns 0\,W at zero utilisation, because it assumes
+        an idle host is switched off. That contradicts the architecture, so \code{LinearPowerModel}
+        is used instead. The SPECpower tables already report idle power at 0\%.
+  \item \code{PowerSpec} has no default numbers. Every value must come from a stated source in the
+        experiment configuration.
+\end{itemize}
+
+Power is piecewise constant between rounds and job ends. \code{GpuLayer.status(i)} returns each
+server's used resources, utilisations and power, so L5 can integrate energy exactly by sampling at
+those moments.
+
+%======================================================================
+\section{Contract changes}
+%======================================================================
+\begin{itemize}
+  \item \code{JobCommand.Start} and \code{Resize} gained a GPU busy fraction in $[0, 1]$. The old
+        four-argument forms remain and mean fully busy.
+  \item \code{ServerShape} gained an optional \code{PowerSpec}; null means energy is not modelled.
+  \item \code{GpuLayer} gained \code{status(i)}, returning a \code{ServerStatus}, and
+        \code{serverCount()}.
+  \item New records \code{PowerSpec} and \code{ServerStatus}.
+\end{itemize}
+
+%======================================================================
+\section{Tests}
+%======================================================================
+
+The Phase~1a stub tests became an abstract \code{PlanExecutorContractTest}: the behaviour any
+\code{GpuLayer} must have. Each implementation's test class extends it. The stub ran it too until
+it was removed; it failed only the new wake-up test, which is the bug described above.
+
+\subsection{Contract tests (9)}
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Test & Checks \\
+\midrule
+constant rate & 1000 iterations at 2/s finish at 500\,s; resources released. \\
+in-place resize & Remaining 900 at 100\,s; finish at 325\,s after a 4$\times$ speed-up; cores updated. \\
+stop and resume & Resume on another server with the remaining work; finish at 500\,s. \\
+move & Resize to another server frees the old one. \\
+same-round reuse & Stop and start in one round, start listed first. \\
+over-commit & Nine GPUs on an 8-GPU server stops the run. \\
+spread job & Two parts finish together; the job ends once. \\
+speed-up at another job's end & Job~2 sped up at the instant job~1 ends finishes at 190\,s. \\
+random resizes & 300 jobs, 1--4 parts, a new random rate every 300\,s; worst error 0.000000\,s. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{GPU-layer tests (7)}
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Test & Checks \\
+\midrule
+exact progress & Rate $1/3$: remaining work at 100\,s is $1000 - 100/3$ within $10^{-9}$. \\
+grow and shrink & Grow listed before shrink on one 24-core server succeeds; both finish on time. \\
+gang allocation & A 3-GPU and a 2-GPU job get GPUs 0--2 and 3--4; all freed at the end. \\
+reservations only & A guest without a reservation is refused by the host. \\
+power & Idle 600\,W; a 4-GPU ResNet-18-like job at 42\% busy and half the cores; then full speed,
+  all cores. Each value matches the formula exactly, and CloudSim's \code{getPower()} agrees. \\
+SPECpower & The IBM x3550 X5675 table gives 58.4\,W idle; an unknown name is rejected. \\
+no power spec & Power reported as NaN. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Whole project}
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Module & Tests & Failures \\
+\midrule
+\code{cloudsim} (unchanged) & 167 & 0 \\
+\code{cloudsim-examples} & 13 & 0 \\
+\code{cloudsim-gpu} & 16 & 0 \\
+\code{cloudsim-cosched} & 13 & 0 \\
+\midrule
+Total & 209 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Command: \code{mvn clean install} from \code{cloudsim/}.
+
+%======================================================================
+\section{Assumptions and limits}
+%======================================================================
+\begin{itemize}
+  \item Allocated CPU cores are fully busy; CPU utilisation is the allocated share.
+  \item GPU busy fraction comes from the throughput profiles (computed by the scheduler).
+  \item A linear GPU power model to rated maximum overestimates power; measured tables are preferred
+        when available.
+  \item Jobs on separate GPUs do not slow each other (no interference), as in Synergy.
+  \item A move between servers has no cost in this version; restart cost belongs to the lifecycle
+        policy (L4).
+  \item NUMA and network links are not modelled; each GPU keeps a socket field as a hook.
+  \item CloudSim's 0.02\,s minimum gap between datacenter updates bounds timing resolution.
+\end{itemize}
+
+%======================================================================
+\section{Next steps}
+%======================================================================
+\begin{enumerate}
+  \item File formats and loaders: job CSV, profile JSON, experiment YAML (\code{docs/formats.md}).
+  \item L2 models: \code{ProfileRepository} and \code{ThroughputModel} from Synergy's profiles
+        (\code{simulator/models/*.py}, now available), \code{LocalityModel}; fidelity test
+        (ResNet-18 at 9 cores per GPU $= 2.4\times$).
+  \item L3 workload: \code{TraceWorkload} and the labellers.
+  \item Then Phase~2: the broker and the first end-to-end run.
+\end{enumerate}
+
+\end{document}

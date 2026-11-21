@@ -22,4 +22,10 @@ public interface GpuLayer {
 
     /** Datacenter entity id, for the broker's characteristics request. Valid after {@link #build}. */
     int datacenterId();
+
+    /** State of one server now: what is allocated, utilisation and power. */
+    ServerStatus status(int serverIndex);
+
+    /** Number of servers built. */
+    int serverCount();
 }

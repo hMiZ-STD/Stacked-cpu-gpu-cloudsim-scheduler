@@ -1,4 +1,4 @@
-package org.cloudbus.cloudsim.gpu.stub;
+package org.cloudbus.cloudsim.gpu;
 
 import org.cloudbus.cloudsim.VmAllocationPolicySimple;
 import org.cloudbus.cloudsim.core.GuestEntity;
@@ -20,11 +20,11 @@ public class PlannedGuestAllocationPolicy extends VmAllocationPolicySimple {
         super(hosts);
     }
 
-    void plan(int guestId, int hostIndex) {
+    public void plan(int guestId, int hostIndex) {
         planned.put(guestId, hostIndex);
     }
 
-    void forget(int guestId) {
+    public void forget(int guestId) {
         planned.remove(guestId);
     }
 
