@@ -1,0 +1,369 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+\lstset{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  breaklines=true,
+  frame=single,
+  framerule=0.3pt,
+  rulecolor=\color{black!30},
+  backgroundcolor=\color{black!3},
+  keywordstyle=\color{blue!60!black}\bfseries,
+  commentstyle=\color{black!55}\itshape,
+  showstringspaces=false
+}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{CPU--GPU Co-Scheduling Module for CloudSim 7G\\[4pt]
+\large Phase 0 and Phase 1a Report: Build Setup, Core Types, GPU-Layer Contract and Stub}
+\author{Chirag}
+\date{21 November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report records the first implementation step of the co-scheduling module described in the
+architecture document (frozen as v1). Phase~0 adds two Maven modules to CloudSim 7G and confirms
+the whole project builds. Phase~1a writes the core types that every scheduling policy uses, the
+contract between the scheduler and the GPU layer, and a stand-in (``stub'') GPU layer built from
+the Check~1 prototypes. All 201 tests in the project pass, 21 of them new. While writing the stub
+we found and fixed a systematic 0.01\,s start delay caused by CloudSim's event timing.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Context}
+%======================================================================
+
+The module lets a researcher describe a GPU cluster, a workload and candidate schedulers, and
+compare how the schedulers perform, including how many CPU cores each training job receives.
+Synergy (OSDI~'22) is replicated first and serves as the correctness check.
+
+The architecture has five layers:
+
+\begin{description}[leftmargin=2.2cm,style=nextline]
+  \item[L1] GPU layer: GPU servers, guests, training jobs and their progress.
+  \item[L2] Performance models: throughput, locality, interference seam, power.
+  \item[L3] Workload: job traces, arrival generators, model labellers.
+  \item[L4] Scheduling pipeline: ordering, allocation, placement, lifecycle, broker.
+  \item[L5] Observation: metrics, energy, comparison runner, decision report.
+\end{description}
+
+L1 was originally assigned to a teammate. Because it had not been started, this phase defined
+the L1 contract and a stub that satisfies it, so the scheduler can be developed and tested now.
+As of 21~November~2026 the author owns L1 as well; the real GPU layer is the next step and will
+replace the stub behind the same contract.
+
+%======================================================================
+\section{Phase 0: Build setup}
+%======================================================================
+
+\subsection{Repository}
+The work lives in the existing CloudSim 7G clone (\code{cloudsim/}, upstream
+\code{cloudslab/cloudsim}, version 7.0.1, Java~21) on the branch \code{cosched/skeleton}.
+CloudSim's own code is not modified. The prototype programs \code{CheckA}--\code{CheckE.java}
+from Check~1 are kept in \code{modules/} as a historical record.
+
+\subsection{Maven modules}
+Two modules were added to the root \code{pom.xml}:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Module & Contents \\
+\midrule
+\code{cloudsim-gpu} & L1: the contract package \code{gpu.api} and the stand-in
+  \code{gpu.stub}. Depends only on CloudSim. \\
+\code{cloudsim-cosched} & Core, L2--L5. Depends on CloudSim and \code{cloudsim-gpu}. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The dependency runs in one direction only: the GPU module knows nothing about the scheduler.
+This is why the contract uses its own small value types (Section~\ref{sec:api}).
+
+\subsection{Dependencies}
+Added to the root \code{dependencyManagement}:
+\begin{itemize}
+  \item \code{jackson-databind} and \code{jackson-dataformat-yaml} 2.17.2: reading the experiment
+        YAML and the profile JSON.
+  \item \code{archunit-junit5} 1.3.0 (test scope): enforcing the architecture rules in later phases.
+  \item \code{opencsv} was already present and will read the job CSV.
+\end{itemize}
+Both new modules use Surefire 3.2.5 so JUnit~5 tests run.
+
+\subsection{Package layout}
+\begin{lstlisting}
+org.cloudbus.cloudsim.gpu.api          contract with the GPU layer
+org.cloudbus.cloudsim.gpu.stub         stand-in GPU layer
+org.cloudbus.cloudsim.cosched.core     core types (this phase)
+org.cloudbus.cloudsim.cosched.model    L2 (empty, next phases)
+org.cloudbus.cloudsim.cosched.workload L3 (empty)
+org.cloudbus.cloudsim.cosched.policy   L4 plug points (empty)
+org.cloudbus.cloudsim.cosched.broker   L4 broker (empty)
+org.cloudbus.cloudsim.cosched.metrics  L5 (empty)
+\end{lstlisting}
+
+%======================================================================
+\section{Phase 1a: Core types}
+%======================================================================
+
+All classes are in \code{org.cloudbus.cloudsim.cosched.core}. Value types are Java records:
+immutable, validated in their constructors, with errors that name the offending item.
+
+\subsection{Resources and clusters}
+
+\paragraph{\code{ResourceVector}} The amount a job holds: whole GPUs (integer), CPU cores and
+memory in GB (doubles, because Synergy allocates fractional shares). It provides \code{plus},
+\code{minus} (returning a \code{Delta} that may be negative), \code{fitsIn} with a tolerance of
+$10^{-9}$ for floating-point noise, and \code{cpusPerGpu}.
+
+\paragraph{\code{ServerGroup}} One line of the cluster YAML: name, count, GPUs, GPU type,
+CPUs, memory, storage and network bandwidth. It also gives the GPU-proportional (``fixed
+$m{:}n$'') share of a job:
+\[
+  \text{share}(g) = \Big(g,\ \tfrac{\text{cpus}}{\text{gpus}}\,g,\ \tfrac{\text{mem}}{\text{gpus}}\,g\Big),
+\]
+so a 2-GPU job on a Synergy server (8 GPUs, 24 CPUs, 500\,GB) gets 6 cores and 125\,GB.
+
+\paragraph{\code{ClusterSpec}} The list of server groups plus an optional rack count. It expands
+the groups into numbered \code{Server}s (group by group, in the order written), gives the total
+capacity $(G, C, M)$ used by the DRF and Tetris keys, and lists the GPU types present so a later
+check can stop the run when a profile is missing. \code{ClusterSpec.synergyDefault()} is Synergy's
+cluster (16 servers $\times$ 8 V100, 24 CPUs, 500\,GB); \code{synergy(n)} varies the CPU count for
+Fig.~12. The YAML example from the architecture document parses unchanged:
+
+\begin{lstlisting}
+server_groups:
+  - { name: training-a100, count: 8,  gpus: 8, gpu_type: A100, cpus: 64,
+      mem_gb: 1024, storage_mbps: 2000, net_gbps: 100 }
+  - { name: legacy-v100,   count: 16, gpus: 8, gpu_type: V100, cpus: 24,
+      mem_gb: 500,  storage_mbps: 500,  net_gbps: 40 }
+racks: 2
+\end{lstlisting}
+
+\paragraph{\code{Allocation}} Where a job runs: one \code{Part} per server, each holding at least
+one GPU. Two parts on the same server are rejected (they must be merged). \code{samePlacement}
+tells whether two allocations use the same servers with the same GPUs, differing only in cores
+or memory; the broker uses it to choose between an in-place resize and a move.
+
+\paragraph{\code{Organisation}} Teams with optional GPU quotas, and priority classes. Without
+teams it defaults to one team, \code{default}, with no quota.
+
+\subsection{What policies see: \code{JobInfo} and \code{ClusterState}}
+Architecture rule~6 says policies read only the cluster view and the model interfaces, and write
+only to the round plan. Two read-only interfaces carry that view:
+
+\begin{itemize}
+  \item \code{JobInfo}: id, arrival time, GPUs requested, model, team, priority, total and
+        remaining work, remaining time at the proportional share (for SRTF and Tetris), attained
+        GPU-seconds (for LAS), first start time and current allocation.
+  \item \code{ClusterState}: current time, servers, free resources per server, active jobs,
+        organisation, and the busy GPU fraction (for Philly-style quota preemption at 90\%).
+\end{itemize}
+
+\subsection{\code{RoundPlan}}
+A round plan is the draft of one scheduling round. It is the answer to the first risk found while
+reading Synergy's code: Tune shrinks other jobs while placing one, which a read-only view cannot
+allow. In the plan:
+
+\begin{enumerate}
+  \item Every \code{assign(job, allocation)} is checked against each server's free capacity
+        at once. A write that does not fit changes nothing and returns \code{false}, so the plan
+        is always feasible.
+  \item A job may be assigned again in the same round; its own previous entry counts as free.
+        This is how Tune shrinks an over-share job and then places the new one.
+  \item Gang allocation is enforced: an allocation must hold exactly the GPUs the job asked for.
+  \item A plan starts either \code{EMPTY} (Synergy's round-based mode: every running job must be
+        re-allocated or it is preempted) or \code{CARRY\_RUNNING} (non-preemptive mode: running
+        jobs keep their allocation and the round only adds waiting jobs).
+\end{enumerate}
+
+Free capacity is tracked as one used-resources vector per server, updated on every write, so
+checks cost $O(\text{parts})$.
+
+\subsection{\code{PolicyRegistry} and \code{Params}}
+Policies are found by name (rule~7). The registry maps (kind, name) to a factory; an unknown name
+fails with the list of known names. Each factory reads its parameters through \code{Params},
+where every read states a default and a valid range:
+
+\begin{lstlisting}[language=Java]
+double roundS = p.getDouble("round_s", 300, 1, 86400);
+\end{lstlisting}
+
+This gives the architecture document's parameter rules directly. Values are range-checked at
+startup; every resolved value, defaults included, is kept for the \code{RunManifest}; and after
+construction any key the policy did not read is reported, which catches typos such as
+\code{round\_sec}.
+
+%======================================================================
+\section{Phase 1a: The GPU-layer contract (\code{gpu.api})}\label{sec:api}
+%======================================================================
+
+\subsection{Design}
+The scheduler decides; the GPU layer carries out. Each round, the broker turns the
+\code{RoundPlan} into a list of commands for the GPU layer:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Command & Meaning \\
+\midrule
+\code{Start(job, remainingWork, parts, rate)} & First start or resume of a waiting job. \\
+\code{Resize(job, parts, rate)} & Change cores, memory or speed. Same servers and GPUs: resized
+  in place. Otherwise: the job is moved (stopped and started with its remaining work). \\
+\code{Stop(job)} & Preempt: release resources and keep the remaining work. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\emph{Rate} is the job's speed in iterations per second. It already includes throughput, locality
+and any interference factor. The GPU layer turns rate into CloudSim speed and never computes
+throughput itself. This is the ``rate-to-speed split'' agreed in Check~3.
+
+\paragraph{Why separate value types.} The architecture document lists \code{ResourceVector} as
+shared with L1. Using it in \code{gpu.api} would make the GPU module depend on the scheduler
+module, which depends on the GPU module: a cycle. The contract therefore uses \code{PartSpec}
+(server, GPUs, cores, memory) and \code{ServerShape} (one server to build), and the broker maps
+between them. This is the only change from the architecture document in this phase.
+
+\subsection{Interfaces}
+\begin{itemize}
+  \item \code{GpuLayer}: \code{build(servers)} creates the datacenter and one host per server;
+        \code{bind(broker)} returns the executor that acts for that broker.
+  \item \code{PlanExecutor}: \code{apply(commands)}, \code{remainingWork(job)},
+        \code{handle(event)} (the broker forwards every event; the GPU layer consumes its own),
+        and \code{setJobEndListener}.
+  \item \code{JobEndListener}: called once per job when all its parts have finished.
+\end{itemize}
+
+\subsection{Rules every implementation must follow}
+These come from Check~1 and are written into the \code{PlanExecutor} documentation:
+
+\begin{enumerate}
+  \item Before any resize or removal, credit every running job's progress at its old speed.
+  \item A resize is deallocate, then allocate; allocating twice leaks host capacity.
+  \item After a resize, wake the datacenter so finish times are recomputed.
+  \item Placement is exactly what the command says; a full host refuses, nothing falls back.
+  \item A refused creation or resize is a bug and stops the run.
+  \item The executor never ends the simulation; the broker does.
+\end{enumerate}
+
+Within one \code{apply}, all stops run first, then resizes, then starts, so capacity freed in a
+round can be reused in the same round regardless of the order the commands are listed in.
+
+%======================================================================
+\section{Phase 1a: The stub GPU layer (\code{gpu.stub})}
+%======================================================================
+
+The stub is the Check~1 prototype code (mainly \code{CheckE}) turned into classes behind
+the contract. It exists so the scheduler can run end to end before the real GPU layer is ready.
+
+\begin{itemize}
+  \item \code{StubGpuHost} extends CloudSim's \code{PowerHost}. CloudSim sees one processing
+        element of $10^{15}$\,MIPS, large enough never to limit speed; GPUs, cores and memory
+        are counted by the host itself, and any over-commit throws (rule~5).
+  \item \code{PlannedGuestAllocationPolicy} places each guest exactly on the host the plan names
+        or refuses it (rule~4). In Check~1, CloudSim's default policy put 15 of 20 guests
+        off plan; this one puts none.
+  \item \code{StubPlanExecutor}: each job part is one VM with one cloudlet holding the job's full
+        remaining work. All parts run at the job's rate, so a spread job's parts finish together
+        (lock-step). Speed is carried as VM MIPS with 1 iteration $= 10^6$\,MI, which keeps
+        sub-iteration precision in CloudSim's integer cloudlet lengths.
+\end{itemize}
+
+\subsection{Bug found: every job started 0.01\,s late}
+The first test run showed a job's remaining work at 100\,s as 900.01 instead of 900 (rate 1, work
+1000). The cause is in CloudSim's \code{Datacenter} (line~413): the VM-creation acknowledgement is
+sent after \code{minTimeBetweenEvents}, 0.01\,s by default. The Check~1 prototypes, like the first
+version of the stub, submitted the cloudlet only after that acknowledgement, so every job began
+0.01\,s after its start command. The Check~1 tolerances (0.05\,s) were loose enough to hide it;
+the stub's tests check remaining work directly, which exposed it.
+
+\textbf{Fix.} The cloudlet is now submitted immediately after the VM-creation request. The
+datacenter processes both at the same simulated instant, in order, so the VM exists when the
+cloudlet arrives. The acknowledgement is used only to detect a refused creation. After the fix,
+remaining work and finish times match the hand-computed values exactly.
+
+%======================================================================
+\section{Tests}
+%======================================================================
+
+\subsection{Stub GPU layer (8 tests)}
+A small driver entity sends scripted commands at fixed times and records job ends.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Test & Checks \\
+\midrule
+constant rate & 1000 iterations at 2/s finish at 500\,s; resources released. \\
+in-place resize & Rate 1, then rate 4 and 18 cores at 100\,s: remaining work 900 at 100\,s,
+  finish at $100 + 900/4 = 325$\,s, host cores updated. \\
+stop and resume & Stopped at 100\,s with 900 left; resumed on another server at 200\,s at
+  rate 3; finishes at 500\,s. \\
+move & Resize to another server releases the old one and continues with the remaining work. \\
+same-round reuse & A stop and a start in one round, listed start-first, still fit. \\
+over-commit & Two jobs needing 9 GPUs on an 8-GPU server stop the run with an error. \\
+spread job & Two parts on two servers finish together; the job ends exactly once. \\
+random resizes & CheckE ported: 300 jobs with 1, 2 or 4 parts, a new random rate every 300\,s
+  round, finish times compared with an independent calculation; worst error below 0.05\,s. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Core types (12 tests)}
+Cluster expansion and total capacity; parsing the architecture document's cluster YAML; validation
+messages naming the bad server group; the proportional share; \code{RoundPlan} rejecting what does
+not fit and enforcing gangs; revision within a round (the Tune pattern); \code{CARRY\_RUNNING}
+versus \code{EMPTY}; allocations with two parts on one server rejected; \code{samePlacement};
+registry lookup and known-name errors; parameter range checks and typo detection; organisation
+defaults and duplicate teams.
+
+\subsection{Whole project}
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Module & Tests & Failures \\
+\midrule
+\code{cloudsim} (core, unchanged) & 167 & 0 \\
+\code{cloudsim-examples} & 13 & 0 \\
+\code{cloudsim-gpu} & 8 & 0 \\
+\code{cloudsim-cosched} & 13 & 0 \\
+\midrule
+Total & 201 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Command: \code{mvn install} from \code{cloudsim/}.
+
+%======================================================================
+\section{Next steps}
+%======================================================================
+\begin{enumerate}
+  \item \textbf{Real GPU layer} (now owned by the author): \code{GpuHost} (PowerHost with GPU
+        provisioning, GPU type and power), \code{GpuProvisioner} (gang allocation), \code{GpuVm},
+        \code{TrainingJob} and \code{TrainingCloudlet}, \code{GpuCloudletScheduler} and a
+        \code{GpuPlanExecutor}, replacing the stub behind \code{gpu.api}. The stub's tests become
+        the acceptance tests for the real layer.
+  \item \textbf{Formats and loaders}: job CSV, profile JSON, experiment YAML, documented in
+        \code{docs/formats.md}.
+  \item \textbf{L2 models}: \code{ThroughputModel}, \code{ProfileRepository}, \code{LocalityModel};
+        the Synergy profile converter and the fidelity test (ResNet-18 at 9 cores $= 2.4\times$),
+        which need Synergy's repository in \code{Experiment/synergy/}.
+\end{enumerate}
+
+\end{document}
