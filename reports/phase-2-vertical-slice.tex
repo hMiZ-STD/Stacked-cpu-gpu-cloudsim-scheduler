@@ -1,0 +1,219 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, breaklines=true, frame=single,
+  framerule=0.3pt, rulecolor=\color{black!30}, backgroundcolor=\color{black!3}, showstringspaces=false}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{CPU--GPU Co-Scheduling Module for CloudSim 7G\\[4pt]
+\large Phase 2 Report: Vertical Slice, the First End-to-End Run}
+\author{Chirag \and Hamiz}
+\date{22 November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Phase~2 connects every layer for the first time. An experiment YAML names a cluster, a workload and
+candidate schedulers; jobs are read and labelled, flow through a scheduling broker that builds a
+round plan with pluggable policies, run on the GPU layer at speeds from the throughput profiles, and
+come out as a per-job result file with a run manifest. The first policies are FIFO ordering, the
+fixed CPU:GPU share, consolidated placement with STRICT locality, a non-preemptive lifecycle, and
+periodic or event-driven rounds. Hand-computed job completion times are matched, results are
+identical across runs, the output is read directly by \code{tools/compare\_runs.py}, and the
+architecture's dependency rules are enforced by tests. All 242 tests of the project pass.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{What runs end to end}
+%======================================================================
+
+\begin{enumerate}
+  \item \code{ExperimentRunner} reads the YAML (\code{docs/formats.md}) and, for every candidate and
+        seed, starts a fresh simulation.
+  \item The candidate's plug-ins are built by name from \code{StandardPlugins}; every parameter is
+        range-checked and recorded.
+  \item The workload CSV is read and labelled; all needed profiles are checked to exist before the run.
+  \item The GPU layer builds one host per server; the broker is created and bound to it.
+  \item The simulation runs. At the end the runner checks that every job finished and writes
+        \code{jobs.csv} and \code{manifest.json} under \code{<output\_dir>/<candidate>/seed-<seed>/}.
+\end{enumerate}
+
+%======================================================================
+\section{Policy interfaces}
+%======================================================================
+
+Each plug point is a small interface in \code{cosched.policy}. Policies read only the cluster view
+(\code{ClusterState}), the round plan and the models, and write only to the round plan
+(architecture rule~6).
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Interface & Decides \\
+\midrule
+\code{SchedulingTrigger} & When rounds happen: every \code{round\_s}, and/or on job arrival and end. \\
+\code{OrderingPolicy} & Which job is served first. \\
+\code{AllocationPolicy} & How many cores and how much memory a job asks for on a server group. \\
+\code{PlacementPolicy} & Which servers a job runs on, reading free capacity from the plan. \\
+\code{LifecycleController} & Whether running jobs keep their allocation or are re-allocated each round. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{First implementations}
+\begin{itemize}
+  \item \textbf{FIFO}: by arrival time, ties by id. Every waiting job is tried in that order, and a job
+        that does not fit is skipped for this round, so a smaller later job may use GPUs the head job
+        cannot.
+  \item \textbf{GPU-proportional allocation} (Synergy's ``+fair''): per GPU, server cores and memory
+        divided by server GPUs (3 cores and 62.5\,GB on Synergy's server).
+  \item \textbf{Consolidated placement, STRICT}: the fullest server that fits (fewest free GPUs, ties
+        by index), never spanning servers. SOFT locality comes with Synergy's policies in Phase~3.
+  \item \textbf{Non-preemptive lifecycle}: the plan starts with running jobs as they are; rounds only
+        place waiting jobs.
+  \item \textbf{Triggers}: periodic (default 300\,s, Synergy's \code{round\_duration}) or event-driven.
+\end{itemize}
+
+\code{StandardPlugins} is the only class that names concrete policies (rule~7). Each entry states
+its parameters' defaults, ranges and sources.
+
+%======================================================================
+\section{The broker}
+%======================================================================
+
+\code{CoSchedulingBroker} is a CloudSim entity. It extends \code{SimEntity} rather than
+\code{DatacenterBroker} as first planned: \code{DatacenterBroker} processes guest-creation
+acknowledgements and cloudlet returns itself, and in this design those belong to the GPU layer's
+executor. Every event goes to the executor first.
+
+\paragraph{Arrivals.} Jobs arrive in order from the workload; each arrival schedules the next, so the
+event queue stays small. Work is the job's iterations; a trace job given as a duration gets one work
+unit per second at the fixed share. A job needing more GPUs than the placement can ever give (with
+STRICT locality: more than one server's GPUs) stops the run before it starts, with advice to filter
+such jobs.
+
+\paragraph{A round.}
+\begin{enumerate}
+  \item Take a read-only snapshot: time, servers, free resources, active jobs, organisation.
+  \item Create the round plan as the lifecycle asks (empty, or carrying running jobs).
+  \item Order the jobs not yet in the plan; for each, ask allocation for its demand on each server
+        group and placement for servers, and write the result into the plan. A placement that does
+        not fit its own plan is a bug and stops the run.
+  \item Diff the plan against what is running: \code{START}, \code{RESIZE}, \code{STOP}, or nothing.
+  \item For each change compute the job's rate and GPU busy fraction (\code{RateCalculator}) and send
+        the commands to the GPU layer in one call.
+\end{enumerate}
+
+\paragraph{Ending.} With periodic rounds, an idle cluster skips ahead to the first round at or after
+the next arrival; when nothing is running and nothing is left to arrive, the broker schedules no more
+rounds and the run ends. The broker never ends the simulation itself (GPU-layer contract rule~6).
+
+\paragraph{Admission control} is a named method that accepts every job, a seam rather than a plug
+point, since no paper or trace used so far needs it.
+
+%======================================================================
+\section{Outputs}
+%======================================================================
+
+\paragraph{\code{jobs.csv}.} One row per job, sorted by id:
+\code{job\_id, model, gpus, arrival\_s, start\_s, finish\_s, jct\_s, queue\_s, starts, cpus\_per\_gpu,
+mem\_gb\_per\_gpu}. JCT is finish minus arrival, queueing included, as Synergy defines it. Values are
+rounded to the microsecond, far below CloudSim's 0.02\,s resolution.
+
+\paragraph{\code{manifest.json}.} Experiment, candidate and seed; git commit (marked \code{+dirty}
+with uncommitted changes); SHA-256 of the YAML and the job CSV; model settings; every plug-in with its
+resolved parameters; the cluster; the assumptions in words; model warnings; the number of rounds and
+commands; and the summary (mean, p99, p99.9 JCT in hours, mean queueing delay, makespan).
+
+%======================================================================
+\section{Smoke run}
+%======================================================================
+
+\code{presets/smoke/} holds 20 jobs on two Synergy-shaped servers (8 V100, 24 CPUs, 500\,GB), with
+real models and iteration times from the converted profiles, and two candidates: FIFO with the fixed
+share under 300\,s rounds, and the same with event-driven rounds.
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Candidate & Mean JCT (h) & p99 JCT (h) & Mean queue (s) & Makespan (s) \\
+\midrule
+FIFO, fixed share, 300\,s rounds & 1.824 & 4.814 & 2408 & 21{,}855 \\
+FIFO, fixed share, event-driven & 1.758 & 4.653 & 2170 & 21{,}345 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both runs take about one second together. Event-driven rounds do slightly better, as expected,
+because jobs do not wait for the next 300\,s boundary. Spot checks: job~0 (AlexNet, 7,692
+iterations at 0.6\,s) finishes at exactly 4615.2\,s; job~1 arrives at 493.2\,s and, under 300\,s
+rounds, starts at the 600\,s round. Running the preset twice gives byte-identical \code{jobs.csv}.
+\code{tools/compare\_runs.py} reads the output directly; comparing the two candidates reports a
+relative difference of the mean of 3.6\%.
+
+%======================================================================
+\section{Tests}
+%======================================================================
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Test & Checks \\
+\midrule
+event-driven & One 8-GPU server. Job~1 (8 GPUs, 100 iterations at 1/s) runs 0--100\,s; jobs~2 and 3
+  (4 GPUs each) wait and both start at 100\,s, finishing at 150\,s and 130\,s. Fixed share is 4 GPUs,
+  12 cores, 250\,GB. \\
+periodic & Same jobs with 300\,s rounds: jobs~2 and 3 start at 300\,s and finish at 350\,s and 330\,s. \\
+FIFO skipping & A later 4-GPU job runs beside a running job while the 8-GPU head job waits. \\
+placement & A 2-GPU job joins the half-full server; the 8-GPU job gets the empty one. \\
+too large & A 16-GPU job on 8-GPU servers stops the run before it starts. \\
+plan diff & Start, resize, stop, and no change for unchanged jobs. \\
+smoke run & Both candidates finish all 20 jobs; files and manifest written; resolved parameters
+  recorded; event-driven mean JCT is not worse than periodic. \\
+repeatability & Two runs give identical \code{jobs.csv}. \\
+bad config & Unknown policy name (error lists known names) and out-of-range \code{round\_s}. \\
+architecture (5) & Policies depend only on core, models and policy interfaces; core depends on nothing
+  else in the module; models do not depend on policies or the broker; no policy implementation uses
+  another; only \code{StandardPlugins} names concrete policies. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{center}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Module & Tests (all passing) \\
+\midrule
+\code{cloudsim} (unchanged) & 167 \\
+\code{cloudsim-examples} & 13 \\
+\code{cloudsim-gpu} & 16 \\
+\code{cloudsim-cosched} & 46 \\
+\midrule
+Total & 242 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{Next step}
+%======================================================================
+Phase~3 adds Synergy's own policies: Greedy and Tune allocation (Tune as a joint allocation and
+placement policy that may shrink co-located jobs through the round plan), the round-based lifecycle,
+SOFT locality, and the SRTF, LAS and FTF orderings, with a \code{synergy-replica} preset. Phase~4 then
+replays Synergy's reference run and must match its mean JCT within 10\%.
+
+\end{document}

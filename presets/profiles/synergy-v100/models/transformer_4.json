@@ -1,0 +1,102 @@
+{
+  "model": "transformer",
+  "gpu_type": "V100",
+  "gpu_count": 4,
+  "batch_size": 128,
+  "iter_time_s": 0.67,
+  "iter_time_base_s": null,
+  "ideal_cpus_per_gpu": 1,
+  "ideal_mem_gb_per_gpu": 62.5,
+  "ideal_storage_speed_per_gpu": 62.5,
+  "ideal_speedup": 1,
+  "placement_penalty": 1,
+  "cpus": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    9,
+    12,
+    24
+  ],
+  "mem_fractions": [
+    0.25,
+    0.5,
+    0.75,
+    1.0
+  ],
+  "mem_gb_per_gpu": [
+    62.5,
+    125,
+    187.5,
+    250
+  ],
+  "throughput": [
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  ],
+  "fair_share": {
+    "cpus_per_gpu": 3,
+    "mem_gb_per_gpu": 62.5,
+    "throughput": 1.0,
+    "throughput_full_mem": 1.0
+  },
+  "column_mapping": "inferred: cvxpy_test.py mem_val = Job.mem_val[1:] (4-column legacy format)",
+  "used_by_synergy": false,
+  "defaults_used": [],
+  "source": "simulator/models/transformer_4.py"
+}

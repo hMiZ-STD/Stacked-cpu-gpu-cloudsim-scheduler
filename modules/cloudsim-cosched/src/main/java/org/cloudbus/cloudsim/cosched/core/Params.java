@@ -68,6 +68,23 @@ public final class Params {
         return s;
     }
 
+    /** A list of {@code size} numbers, each in [min, max]. */
+    public List<Double> getDoubleList(String key, List<Double> def, int size, double min, double max) {
+        Object v = raw.get(key);
+        List<Double> out = new java.util.ArrayList<>();
+        if (v == null) out.addAll(def);
+        else if (v instanceof List<?> l) {
+            for (Object o : l) {
+                if (!(o instanceof Number n)) throw bad(key, "must be a list of numbers, got '" + v + "'");
+                out.add(n.doubleValue());
+            }
+        } else throw bad(key, "must be a list, got '" + v + "'");
+        if (out.size() != size) throw bad(key, "must have " + size + " values, got " + out.size());
+        for (double d : out) if (d < min || d > max) throw bad(key, "value " + d + " is outside [" + min + ", " + max + "]");
+        resolved.put(key, List.copyOf(out));
+        return List.copyOf(out);
+    }
+
     /** Throws if the YAML set a key no plug-in read (usually a typo). Call after construction. */
     public void checkNoUnknown() {
         Set<String> unknown = new TreeSet<>(raw.keySet());

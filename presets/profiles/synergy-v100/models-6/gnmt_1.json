@@ -1,0 +1,113 @@
+{
+  "model": "gnmt",
+  "gpu_type": "V100",
+  "gpu_count": 1,
+  "batch_size": 128,
+  "iter_time_s": 0.12,
+  "iter_time_base_s": 0.12,
+  "ideal_cpus_per_gpu": 1,
+  "ideal_mem_gb_per_gpu": 20,
+  "ideal_storage_speed_per_gpu": 20,
+  "ideal_speedup": 1,
+  "placement_penalty": 1,
+  "cpus": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    9,
+    12,
+    24
+  ],
+  "mem_fractions": [
+    0.0833,
+    0.25,
+    0.5,
+    0.75,
+    1.0
+  ],
+  "mem_gb_per_gpu": [
+    20.83,
+    62.5,
+    125,
+    187.5,
+    250
+  ],
+  "throughput": [
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ]
+  ],
+  "fair_share": {
+    "cpus_per_gpu": 3,
+    "mem_gb_per_gpu": 62.5,
+    "throughput": 1.0,
+    "throughput_full_mem": 1.0
+  },
+  "column_mapping": "jobs/job.py Job.mem_val (5 columns)",
+  "used_by_synergy": true,
+  "defaults_used": [],
+  "source": "simulator/models-6/gnmt_1.py"
+}

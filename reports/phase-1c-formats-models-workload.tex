@@ -1,0 +1,207 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, breaklines=true, frame=single,
+  framerule=0.3pt, rulecolor=\color{black!30}, backgroundcolor=\color{black!3}, showstringspaces=false}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{CPU--GPU Co-Scheduling Module for CloudSim 7G\\[4pt]
+\large Phase 1c Report: File Formats, Performance Models and Workload}
+\author{Chirag \and Hamiz}
+\date{22 November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Phase~1c builds the inputs of a simulation run. It fixes the three file formats (job CSV, profile
+JSON, experiment YAML) shared with the Python tools in \code{tools/}; loads Synergy's 69 measured
+throughput profiles, converted by \code{tools/convert\_synergy\_profiles.py}; implements the throughput,
+locality and rate models; and implements the workload reader and model labellers. Two results stand
+out. First, the class-split labeller reproduces Synergy's model label for all 1,000 measured jobs of
+the reference run, so validation can regenerate labels instead of copying them. Second, Synergy's
+Fig.~12 profiles keep one throughput table but state speedups relative to each cluster's own fixed
+share; normalising to the server's fixed share reproduces them. All 31 tests of the co-scheduling
+module pass.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Inputs from the tools}
+%======================================================================
+
+The tools in \code{tools/} (profile converter, Synergy job extractor, Philly preparation, run
+comparator) were added in commit \code{06a3cc98}. They are the only code that reads raw traces or
+Synergy's files; the simulator reads only the formats below. The converter was checked against
+Synergy's source before its output was used:
+
+\begin{itemize}
+  \item Rows of Synergy's \code{tput} matrix are cores per GPU $\{1,2,3,4,5,6,9,12,24\}$ and columns
+        are GB of memory per GPU $\{20.83, 62.5, 125, 187.5, 250\}$ (\code{jobs/job.py}, lines 96--97).
+  \item Synergy's simulator loads only \code{<model>\_1} files (\code{jobs/model.py}, line 171).
+  \item ResNet-18 gives 1.0 at 3 cores and 62.5\,GB per GPU (the fixed share on a 24-CPU, 8-GPU,
+        500\,GB server) and 2.4 at 9 cores, as stated in the architecture document.
+\end{itemize}
+
+The converter's own tests pass (26 passed; one is skipped because it needs a Synergy \code{out.log}).
+The converted profiles are stored in \code{presets/profiles/synergy-v100/} with their source and
+licence (MIT).
+
+%======================================================================
+\section{File formats}
+%======================================================================
+
+The formats are documented in \code{docs/formats.md}.
+
+\paragraph{Job CSV.} Required: \code{job\_id}, \code{arrival\_s}, \code{gpus}, and work as either
+\code{iterations} (Synergy-style, optionally with \code{iter\_time\_s}) or \code{duration\_s}
+(trace-style: run time at the fixed share). Optional: \code{model}, \code{team}, \code{priority}.
+Other columns are ignored, so a reference file with \code{jct\_s} can be read as a workload. Every
+error names its line, and duplicate job ids are rejected.
+
+\paragraph{Profile JSON.} One file per (model, GPU type, GPU count). The Java loader reads the
+fields the converter writes, ignores the rest, and validates the axes (strictly increasing) and the
+table shape.
+
+\paragraph{Experiment YAML.} Cluster, organisation, workload and labeller, model settings, the
+candidate schedulers (each a trigger, ordering, allocation, placement and lifecycle plug-in with
+parameters), seeds and output folder. Unknown keys are errors; relative paths are relative to the
+YAML file.
+
+%======================================================================
+\section{Performance models (L2)}
+%======================================================================
+
+\subsection{Profile repository}
+Profiles are looked up by (model, GPU type, GPU count). With \code{scaling: linear} (what Synergy
+does) a job on any number of GPUs uses the 1-GPU profile; with \code{per\_gpu\_count} it uses the
+profile measured for its exact GPU count. A missing profile stops the run with a list of what is
+available; there is never a fallback to another GPU type. \code{requireAll} checks every needed
+combination before a run starts.
+
+\paragraph{Unmeasured points.} The multi-GPU files (not used by Synergy) contain all-zero rows at
+high core counts: 12 and 24 cores per GPU for 2 GPUs, 9 to 24 for 4 GPUs. These mean ``not measured''
+(for 4 GPUs, 9 cores per GPU would need 36 of a server's 24 cores). The loader accepts only trailing
+all-zero rows and treats the last non-zero row as the largest measured point.
+
+\subsection{Throughput model}
+Speedup is always relative to the job's speed at the fixed share of the server it runs on:
+\[
+  \text{speedup}(c, m) = \frac{T(c, m)}{T(c_\text{fair}, m_\text{fair})}, \qquad
+  c_\text{fair} = \frac{\text{server cores}}{\text{server GPUs}}, \quad
+  m_\text{fair} = \frac{\text{server memory}}{\text{server GPUs}},
+\]
+where $c$ and $m$ are the job's cores and memory per GPU and $T$ is the profile table. Between
+measured CPU points $T$ is linearly interpolated; the memory column is the largest measured value at
+or below $m$. Below the first point the first value is used. Beyond the last measured point $T$ stays
+at the last value and a warning is recorded once per model. Nothing is extrapolated.
+
+\paragraph{Finding: the Fig.~12 profiles.} Synergy's \code{models-4}, \code{models-5} and
+\code{models-6} belong to servers with 32, 40 and 48 CPUs. Their tables are identical to the default
+ones (1.0 at 3 cores per GPU), but their \code{ideal\_speedup} is lower: for ResNet-18, 1.85, 1.568
+and 1.37 instead of 2.4. These equal $T(9)/T(4)$, $T(9)/T(5)$ and $T(9)/T(6)$, the speedup over each
+cluster's own fixed share of 4, 5 and 6 cores per GPU. This holds for 46 of the 48 single-GPU
+profiles. Normalising to the server's fixed share, as above, therefore reproduces Synergy's values
+from the table alone; a model that always divided by the 3-core value would be wrong on these
+clusters.
+
+The other two profiles, \code{models-6/alexnet} and \code{models-6/shufflenet}, have a changed
+\code{ideal\_speedup} and \code{iter\_time} but an unchanged table, so table and speedup disagree in
+Synergy's own data. This is recorded in the profiles' README.
+
+\paragraph{Two modes.} \code{table} uses the formula above. \code{synergy\_two\_point} does exactly what
+Synergy's simulator does: a job holding at least its ideal cores and memory per GPU runs at
+\code{ideal\_speedup}, anything else at 1.0. Synergy's Greedy and Tune only ever allocate these two
+points, so validation presets use this mode and are exact even for the two inconsistent profiles.
+
+\paragraph{Ideal demand and GPU busy fraction.} The ideal demand is the profile's ideal cores and
+memory per GPU times the job's GPUs, capped at one server. The GPU busy fraction is the speedup at the
+current allocation divided by the speedup at the ideal demand, at most 1; for ResNet-18 at the fixed
+share this is $1/2.4 \approx 42\%$. It drives GPU power in the GPU layer.
+
+\subsection{Locality, interference and rate}
+\code{LocalityModel} returns 1 for a job on one server and the penalty $p$ when it is spread
+(validation: $p = 1$, as in all of Synergy's active profiles). \code{InterferenceModel} is the named
+seam for a future measured slowdown; in this version it is 1. \code{RateCalculator} is the single
+place a job's speed is computed, following Synergy's \code{jobs/job.py}:
+\[
+  \text{rate} = \frac{\text{speedup} \times \text{locality} \times \text{interference}}{\text{iteration time at the fixed share}}
+  \quad \text{iterations per second.}
+\]
+The iteration time is the job's own when the job CSV gives one (the reference run does, per job) and
+the profile's otherwise.
+
+%======================================================================
+\section{Workload (L3)}
+%======================================================================
+
+\code{JobCsvReader} reads the job CSV; \code{TraceWorkload} orders jobs by arrival (ties by id) and
+labels each one in that order. Two labellers are implemented.
+
+\paragraph{From trace.} Uses the CSV's \code{model} column; a job without one is an error.
+
+\paragraph{Class split (Synergy's rule).} Synergy's simulator uses assignment mode \code{OVERALL}
+(\code{jobs/workload.py}, line 62). Each class (image, language, speech) has a priority
+\[
+  \text{priority} = \frac{\text{target percent}}{100} - \frac{\text{jobs of the class so far}}{\text{all jobs so far}},
+\]
+the job goes to the class with the highest priority (ties to the earlier class, as Python's stable
+sort does), and within the class models are taken round-robin: image \{alexnet, res18, res50,
+mobilenet, shufflenet\}, language \{gnmt, transformer, lstm\}, speech \{m5, deepspeech\}.
+
+\paragraph{Finding: labels are reproducible.} Labelling jobs 0 to 4999 in order with split
+(20, 70, 10) gives exactly Synergy's model for all 1,000 measured jobs (4000--4999) of the reference
+run, and the expected class totals (1000, 3500, 500). The architecture document assumed that labels
+depend on which jobs are running and therefore cannot be regenerated; that is true only of Synergy's
+unused \code{RUNNABLE} mode. In \code{OVERALL} mode labels depend only on arrival order.
+
+%======================================================================
+\section{Tests}
+%======================================================================
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Test & Checks \\
+\midrule
+fidelity & Every single-GPU profile Synergy uses: 1.0 at the fixed share and \code{ideal\_speedup} at its
+  ideal demand (table mode within 0.02; two-point mode exactly). \\
+ResNet-18 & 2.4 at 9 cores per GPU; ideal demand of a 2-GPU job is 18 cores, 125\,GB. \\
+Fig.~12 & On a 32-CPU server with \code{models-4}: 1.0 at 4 cores per GPU, 1.85 at the ideal. \\
+interpolation & 7.5 cores per GPU is half way between the 6- and 9-core values; memory below 62.5\,GB
+  uses the 20.83\,GB column. \\
+beyond measured & Held at the last value; one warning per model. \\
+missing profile & Unknown GPU type, unknown model and a missing GPU count all stop the run. \\
+scaling & \code{linear} picks the 1-GPU profile for 4 GPUs; \code{per\_gpu\_count} the 4-GPU one. \\
+locality, rate & Penalty only when spread; rate $= 2.4/0.64$ at the ideal, $\times 0.8$ when spread,
+  $1/0.64$ at the fixed share with GPUs 42\% busy. \\
+job CSV & Both work styles, extra columns ignored, errors with line numbers, duplicates rejected. \\
+labellers & From-trace needs a model; class split reproduces Synergy's 1,000 labels and starts with the
+  first class and round-robins within classes. \\
+YAML & The documented example parses; unknown keys and incomplete candidates are rejected. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Co-scheduling module: 31 tests, 0 failures (\code{mvn install}).
+
+%======================================================================
+\section{Next step}
+%======================================================================
+Phase~2 connects these inputs to the GPU layer: the policy interfaces, FIFO with GPU-proportional
+allocation and consolidated placement, the broker that builds a round plan and turns it into GPU-layer
+commands, per-job metrics, the run manifest and the experiment runner, and the first end-to-end run.
+
+\end{document}

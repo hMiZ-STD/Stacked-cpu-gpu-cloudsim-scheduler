@@ -1,0 +1,29 @@
+# Smoke test: 20 jobs on two Synergy-shaped servers, FIFO with the fixed CPU:GPU share.
+# Checks the whole pipeline end to end; not a validation of any paper result.
+name: smoke
+cluster:
+  server_groups:
+    - { name: v100, count: 2, gpus: 8, gpu_type: V100, cpus: 24, mem_gb: 500, storage_mbps: 500, net_gbps: 40 }
+workload:
+  csv: jobs.csv
+  labeller: { name: from_trace }
+models:
+  profiles_dir: ../profiles/synergy-v100/models
+  scaling: linear
+  throughput_mode: table
+  locality_penalty: 1.0
+candidates:
+  - name: fifo-fair-periodic
+    trigger:    { name: periodic, params: { round_s: 300 } }
+    ordering:   { name: fifo }
+    allocation: { name: gpu_proportional }
+    placement:  { name: consolidated, params: { locality: strict } }
+    lifecycle:  { name: non_preemptive }
+  - name: fifo-fair-event
+    trigger:    { name: event_driven }
+    ordering:   { name: fifo }
+    allocation: { name: gpu_proportional }
+    placement:  { name: consolidated }
+    lifecycle:  { name: non_preemptive }
+seeds: [42]
+output_dir: ../../out/smoke
