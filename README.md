@@ -23,6 +23,7 @@ Training jobs need CPU cores to decode and prepare data for the GPU. Most schedu
 | `modules/cloudsim-cosched` | Co-scheduling framework: core types, performance models, workload, scheduling pipeline, metrics |
 | `prototypes/` | Check 1 feasibility prototypes, kept as a historical record |
 | `docs/cloudsim/` | CloudSim's own README, changelog, UML diagrams and documentation |
+| `reading-docs/` | Full project handbook: onboarding, architecture, commit history, glossary, validation & extension guide ([start here](reading-docs/README.md)) |
 | `custom_log.properties` | Logging config read by some CloudSim examples; must stay in the repository root |
 | `reports/` | One LaTeX report per implementation phase |
 | `tools/` | Python tools: Synergy profile converter, job extractor, Philly prep, run comparator; `synergy_validation/` reruns the Phase 4 references |
