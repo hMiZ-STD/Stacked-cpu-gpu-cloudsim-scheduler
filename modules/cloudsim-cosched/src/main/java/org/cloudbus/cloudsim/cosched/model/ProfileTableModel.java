@@ -53,6 +53,54 @@ public final class ProfileTableModel implements ThroughputModel {
     public ProfileTableModel(ProfileRepository profiles, Mode mode) {
         this.profiles = profiles;
         this.mode = mode;
+        if (mode == Mode.SYNERGY_TWO_POINT)
+            for (Profile p : profiles.all()) {
+                // Synergy's 4th resource, storage speed, equals memory in every profile it uses; we leave it out.
+                if (p.idealStorageSpeedPerGpu() != null && Math.abs(p.idealStorageSpeedPerGpu() - p.idealMemGbPerGpu()) > EPS)
+                    throw new IllegalArgumentException(p + ": storage-speed demand differs from memory demand; "
+                            + "Synergy's storage dimension would then matter, which this model leaves out");
+            }
+    }
+
+    /** A job's ideal demand on a server group and the speedup it gets there (Synergy's rule). */
+    public record IdealPoint(ResourceVector demand, double speedup) {
+    }
+
+    /**
+     * Synergy's ideal demand ({@code jobs/workload.py, add_synergy_profile}): GPUs x the profile's ideal
+     * cores and memory per GPU. If that exceeds one server, it is capped at the server and the speedup is
+     * re-interpolated on the straight line between the fixed share (speedup 1) and the ideal point, in
+     * cores. A job with more GPUs than a server gets the fixed share and speedup 1 instead.
+     */
+    public IdealPoint idealPoint(JobInfo job, ServerGroup group) {
+        Profile p = profile(job, group);
+        int g = job.gpus();
+        double cpus = g * p.idealCpusPerGpu(), mem = g * p.idealMemGbPerGpu(), s = p.idealSpeedup();
+        boolean reinterpolate = false;
+        if (cpus > group.cpus()) {
+            cpus = group.cpus();
+            reinterpolate = true;
+            if (g > group.gpus()) {
+                cpus = g * group.cpus() / group.gpus();
+                s = 1;
+                reinterpolate = false;
+            }
+        }
+        if (mem > group.memGb()) {
+            mem = group.memGb();
+            reinterpolate = true;
+            if (g > group.gpus()) {
+                mem = g * group.memGb() / group.gpus();
+                s = 1;
+                reinterpolate = false;
+            }
+        }
+        if (reinterpolate) {
+            double fairCpus = g * group.cpus() / group.gpus(), idealCpus = g * p.idealCpusPerGpu();
+            if (Math.abs(idealCpus - fairCpus) > EPS)   // Synergy raises an error when they are equal; keep the speedup
+                s = 1 + (s - 1) / (idealCpus - fairCpus) * (cpus - fairCpus);
+        }
+        return new IdealPoint(new ResourceVector(g, cpus, mem), s);
     }
 
     public Mode mode() {
@@ -64,19 +112,18 @@ public final class ProfileTableModel implements ThroughputModel {
         if (total.gpus() != job.gpus()) throw new IllegalArgumentException("job " + job.id() + " holds " + total.gpus() + " GPUs, asked for " + job.gpus());
         Profile p = profile(job, group);
         double c = total.cpus() / total.gpus(), m = total.memGb() / total.gpus();
-        if (mode == Mode.SYNERGY_TWO_POINT)
-            return c >= p.idealCpusPerGpu() - EPS && m >= p.idealMemGbPerGpu() - EPS ? p.idealSpeedup() : 1.0;
+        if (mode == Mode.SYNERGY_TWO_POINT) {
+            IdealPoint ip = idealPoint(job, group);
+            boolean atIdeal = total.cpus() >= ip.demand().cpus() - EPS && total.memGb() >= ip.demand().memGb() - EPS;
+            return atIdeal ? ip.speedup() : 1.0;
+        }
         ResourceVector fair = group.proportionalShare(1);
         return lookup(p, c, m, true) / lookup(p, fair.cpus(), fair.memGb(), false);
     }
 
     @Override
     public ResourceVector idealDemand(JobInfo job, ServerGroup group) {
-        Profile p = profile(job, group);
-        int g = job.gpus();
-        double cpus = Math.min(p.idealCpusPerGpu() * g, group.cpus());
-        double mem = Math.min(p.idealMemGbPerGpu() * g, group.memGb());
-        return new ResourceVector(g, cpus, mem);
+        return idealPoint(job, group).demand();
     }
 
     @Override

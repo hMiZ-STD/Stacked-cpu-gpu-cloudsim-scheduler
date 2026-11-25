@@ -49,6 +49,26 @@ class ExperimentRunnerTest {
         assertTrue(meanEvent <= meanPeriodic, meanEvent + " vs " + meanPeriodic);
     }
 
+    /** The synergy-replica preset's wiring, run on the smoke jobs (its real jobs.csv comes from a Synergy run). */
+    @Test
+    void synergyReplicaPresetRunsAllThreeVariants(@TempDir Path dir) throws Exception {
+        Files.copy(PRESETS.resolve("smoke/jobs.csv"), dir.resolve("jobs.csv"));
+        String y = Files.readString(PRESETS.resolve("synergy-replica/synergy-replica.yaml"))
+                .replace("../profiles/synergy-v100/models", PRESETS.resolve("profiles/synergy-v100/models").toString())
+                .replace("../../out/synergy-replica", dir.resolve("out").toString());
+        List<ExperimentRunner.RunResult> results = ExperimentRunner.run(Files.writeString(dir.resolve("replica.yaml"), y));
+        assertEquals(List.of("fifo-tune", "fifo-fair", "fifo-greedy"), results.stream().map(ExperimentRunner.RunResult::candidate).toList());
+        for (ExperimentRunner.RunResult r : results) {
+            assertEquals(20, r.summary().get("jobs"));
+            for (String line : Files.readAllLines(r.outputDir().resolve("jobs.csv")).subList(1, 21)) {
+                double finish = Double.parseDouble(line.split(",")[5]);
+                assertEquals(0, finish % 300, 1e-6, "Synergy's rounds: every finish on a round boundary: " + line);
+            }
+        }
+        double tune = (double) results.get(0).summary().get("mean_jct_h"), fair = (double) results.get(1).summary().get("mean_jct_h");
+        assertTrue(tune < fair, "Tune " + tune + " h should beat the fixed share " + fair + " h on an uncontended cluster");
+    }
+
     @Test
     void sameInputsGiveIdenticalResults(@TempDir Path a, @TempDir Path b) throws Exception {
         ExperimentRunner.RunResult ra = ExperimentRunner.run(smoke(a, null)).get(0);

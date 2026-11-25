@@ -35,6 +35,11 @@ public interface JobInfo {
      */
     double remainingTimeAtProportionalShare();
 
+    /** The job's whole run time at the fixed share (Synergy's {@code ideal_duration(fair=True)}), or NaN if unknown. */
+    default double totalTimeAtProportionalShare() {
+        return Double.NaN;
+    }
+
     /** GPU-seconds of service received so far (LAS / Tiresias ordering). */
     double attainedServiceGpuSeconds();
 
@@ -43,6 +48,14 @@ public interface JobInfo {
 
     /** Current allocation, or null if the job is waiting. */
     Allocation allocation();
+
+    /**
+     * Last time the job held resources: the current time if it is running, the time it was last stopped,
+     * or NaN if it has never run. Synergy's SRTF and LAS use it to boost jobs starved for 1000 hours.
+     */
+    default double lastRunTime() {
+        return Double.NaN;
+    }
 
     default boolean isRunning() {
         return allocation() != null;

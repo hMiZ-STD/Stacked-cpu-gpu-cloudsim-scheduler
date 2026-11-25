@@ -23,6 +23,7 @@ public record Profile(
         @JsonProperty("iter_time_s") double iterTimeS,
         @JsonProperty("ideal_cpus_per_gpu") double idealCpusPerGpu,
         @JsonProperty("ideal_mem_gb_per_gpu") double idealMemGbPerGpu,
+        @JsonProperty("ideal_storage_speed_per_gpu") Double idealStorageSpeedPerGpu,
         @JsonProperty("ideal_speedup") double idealSpeedup,
         @JsonProperty("placement_penalty") double placementPenalty,
         double[] cpus,

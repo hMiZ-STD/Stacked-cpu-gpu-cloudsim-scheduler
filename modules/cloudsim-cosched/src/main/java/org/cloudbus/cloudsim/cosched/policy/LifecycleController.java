@@ -11,4 +11,13 @@ public interface LifecycleController {
      * is preempted (Synergy's round-based mode).
      */
     RoundPlan.Start planStart();
+
+    /**
+     * Synergy's round semantics, for exact replication: a job advances exactly
+     * {@code floor(round / iteration time)} whole iterations per round, and a job that finishes inside a
+     * round is recorded as finishing at the round's end. Needs periodic rounds only.
+     */
+    default boolean synergyRounds() {
+        return false;
+    }
 }

@@ -25,8 +25,8 @@ Training jobs need CPU cores to decode and prepare data for the GPU. Most schedu
 | `docs/cloudsim/` | CloudSim's own README, changelog, UML diagrams and documentation |
 | `custom_log.properties` | Logging config read by some CloudSim examples; must stay in the repository root |
 | `reports/` | One LaTeX report per implementation phase |
-| `tools/` | Python tools: Synergy profile converter, job extractor, Philly prep, run comparator |
-| `presets/` | Converted profiles, Synergy reference JCTs, experiment presets (`smoke/`) |
+| `tools/` | Python tools: Synergy profile converter, job extractor, Philly prep, run comparator; `synergy_validation/` reruns the Phase 4 references |
+| `presets/` | Converted profiles, Synergy reference JCTs, experiment presets (`smoke/`, `synergy-replica/`), Synergy validation suite (`synergy-validation/`) |
 | `docs/archive/` | Earlier planning notes (CloudSim Plus era), superseded by the CloudSim 7G architecture |
 
 ## Architecture (five layers)
@@ -65,5 +65,5 @@ Results go to `out/<experiment>/<candidate>/seed-<seed>/jobs.csv` and `manifest.
 | 1b | Real GPU layer: gang-allocated GPUs, work-based progress, power | Done ([report](reports/phase-1b-gpu-layer.tex)) |
 | 1c | Formats, profiles, throughput and rate models, workload and labellers | Done ([report](reports/phase-1c-formats-models-workload.tex)) |
 | 2 | Vertical slice: broker, FIFO, fixed share, STRICT placement, first end-to-end run | Done ([report](reports/phase-2-vertical-slice.tex)) |
-| 3 | Synergy Greedy / Tune, round-based lifecycle | Planned |
-| 4 | Validation against Synergy (mean JCT within 10%) | Planned |
+| 3 | Synergy Greedy / Tune, first-fit and SOFT placement, round-based lifecycle, SRTF / LAS / FTF, `synergy-replica` preset | Done ([report](reports/phase-3-synergy-policies.tex)) |
+| 4 | Validation against Synergy's simulator: 31 configurations, every measured job exact | Done ([report](reports/phase-4-validation.tex)) |

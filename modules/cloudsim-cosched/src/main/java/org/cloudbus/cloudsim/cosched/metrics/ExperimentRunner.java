@@ -19,6 +19,7 @@ import org.cloudbus.cloudsim.cosched.model.ProfileRepository;
 import org.cloudbus.cloudsim.cosched.model.ProfileTableModel;
 import org.cloudbus.cloudsim.cosched.model.RateCalculator;
 import org.cloudbus.cloudsim.cosched.policy.AllocationPolicy;
+import org.cloudbus.cloudsim.cosched.policy.JointAllocationPlacement;
 import org.cloudbus.cloudsim.cosched.policy.LifecycleController;
 import org.cloudbus.cloudsim.cosched.policy.OrderingPolicy;
 import org.cloudbus.cloudsim.cosched.policy.PlacementPolicy;
@@ -77,10 +78,15 @@ public final class ExperimentRunner {
         Instant started = Instant.now();
         PolicyRegistry reg = StandardPlugins.registry();
         Map<String, Object> plugins = new LinkedHashMap<>();
-        SchedulerSetup setup = new SchedulerSetup(
-                create(reg, SchedulingTrigger.class, "trigger", cand, cand.trigger(), plugins),
-                create(reg, OrderingPolicy.class, "ordering", cand, cand.ordering(), plugins),
-                create(reg, AllocationPolicy.class, "allocation", cand, cand.allocation(), plugins),
+        SchedulingTrigger trigger = create(reg, SchedulingTrigger.class, "trigger", cand, cand.trigger(), plugins);
+        OrderingPolicy ordering = create(reg, OrderingPolicy.class, "ordering", cand, cand.ordering(), plugins);
+        AllocationPolicy allocation = null;
+        JointAllocationPlacement joint = null;
+        if (reg.has(JointAllocationPlacement.class, cand.allocation().name()))
+            joint = create(reg, JointAllocationPlacement.class, "allocation", cand, cand.allocation(), plugins);
+        else
+            allocation = create(reg, AllocationPolicy.class, "allocation", cand, cand.allocation(), plugins);
+        SchedulerSetup setup = new SchedulerSetup(trigger, ordering, allocation, joint,
                 create(reg, PlacementPolicy.class, "placement", cand, cand.placement(), plugins),
                 create(reg, LifecycleController.class, "lifecycle", cand, cand.lifecycle(), plugins));
         Map<String, Object> labellerInfo = new LinkedHashMap<>();

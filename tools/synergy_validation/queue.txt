@@ -1,0 +1,30 @@
+load3-fifo-tune FIFO+tune 3 20,70,10 24
+load3-fifo-fair FIFO+fair 3 20,70,10 24
+load6-fifo-tune FIFO+tune 6 20,70,10 24
+load6-fifo-fair FIFO+fair 6 20,70,10 24
+load8-fifo-tune FIFO+tune 8 20,70,10 24
+load8-fifo-fair FIFO+fair 8 20,70,10 24
+load9-fifo-greedy FIFO 9 20,70,10 24
+load9-srtf-tune SRTF+tune 9 20,70,10 24
+load9-srtf-fair SRTF+fair 9 20,70,10 24
+load9-las-tune LAS+tune 9 20,70,10 24
+load9-las-fair LAS+fair 9 20,70,10 24
+load9-ftf-tune FTF+tune 9 20,70,10 24
+load9-ftf-fair FTF+fair 9 20,70,10 24
+cpu32-fifo-tune FIFO+tune 9 20,70,10 32
+cpu32-fifo-fair FIFO+fair 9 20,70,10 32
+cpu40-fifo-tune FIFO+tune 9 20,70,10 40
+cpu40-fifo-fair FIFO+fair 9 20,70,10 40
+cpu48-fifo-tune FIFO+tune 9 20,70,10 48
+cpu48-fifo-fair FIFO+fair 9 20,70,10 48
+split333-fifo-tune FIFO+tune 9 33,33,33 24
+split333-fifo-fair FIFO+fair 9 33,33,33 24
+split333-fifo-greedy FIFO 9 33,33,33 24
+split50050-fifo-tune FIFO+tune 9 50,0,50 24
+split50050-fifo-fair FIFO+fair 9 50,0,50 24
+split50050-fifo-greedy FIFO 9 50,0,50 24
+multi4-las-tune LAS+tune 4 20,70,10 24 --multigpu
+multi4-las-fair LAS+fair 4 20,70,10 24 --multigpu
+multi55-srtf-tune SRTF+tune 5.5 20,70,10 24 --multigpu
+multi55-srtf-fair SRTF+fair 5.5 20,70,10 24 --multigpu
+multi4-fifo-tune FIFO+tune 4 20,70,10 24 --multigpu

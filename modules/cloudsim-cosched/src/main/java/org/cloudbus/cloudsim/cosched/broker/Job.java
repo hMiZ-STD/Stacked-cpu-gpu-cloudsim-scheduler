@@ -24,6 +24,7 @@ public final class Job implements JobInfo {
     private boolean everStarted;
     private double firstStart = Double.NaN, finish = Double.NaN;
     private double attainedGpuS, since;
+    private double lastStop = Double.NaN;
     private int starts;
 
     /**
@@ -62,6 +63,16 @@ public final class Job implements JobInfo {
     }
 
     @Override
+    public double totalTimeAtProportionalShare() {
+        return totalWork * iterTimeS;
+    }
+
+    @Override
+    public double lastRunTime() {
+        return allocation != null ? clock.getAsDouble() : lastStop;
+    }
+
+    @Override
     public double attainedServiceGpuSeconds() {
         return allocation == null ? attainedGpuS : attainedGpuS + allocation.gpus() * (clock.getAsDouble() - since);
     }
@@ -84,14 +95,17 @@ public final class Job implements JobInfo {
                 firstStart = now;
             }
         }
+        if (a == null && allocation != null) lastStop = now;
         allocation = a;
         if (a != null) lastAllocation = a;
     }
 
-    void finish(double now) {
+    /** @param now current time; @param recordedFinish the finish time to report (a round end under Synergy's rounds) */
+    void finish(double now, double recordedFinish) {
         accrue(now);
         allocation = null;
-        finish = now;
+        lastStop = now;
+        finish = recordedFinish;
     }
 
     private void accrue(double now) {

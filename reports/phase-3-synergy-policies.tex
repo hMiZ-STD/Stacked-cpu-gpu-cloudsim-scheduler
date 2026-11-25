@@ -1,0 +1,234 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, breaklines=true, frame=single,
+  framerule=0.3pt, rulecolor=\color{black!30}, backgroundcolor=\color{black!3}, showstringspaces=false}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{CPU--GPU Co-Scheduling Module for CloudSim 7G\\[4pt]
+\large Phase 3 Report: Synergy's Scheduling Policies}
+\author{Chirag \and Hamiz}
+\date{23 November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Phase~3 adds Synergy's own scheduling policies: Synergy-Greedy and Synergy-Tune allocation, first-fit
+and consolidated placement with SOFT locality, the round-based lifecycle, and the SRTF, LAS and FTF
+orderings, together with a \code{synergy-replica} preset that locks every setting to Synergy's simulator.
+Before writing code we read Synergy's simulator and found that it differs from the paper in several
+places that change results: there is no GPU/CPU/memory sort in Tune, the reference run places jobs by
+first fit rather than on the fullest server, progress is counted in whole iterations per round, and
+finish times are always round boundaries. We follow the code. A run on a trace built from the paper's
+recipe shows the paper's ordering of results (Tune ahead of Greedy, both far ahead of the fixed share)
+and takes 22\,s for 6{,}500 jobs and three schedulers. All 261 tests of the project pass.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Why read Synergy's code first}
+%======================================================================
+
+Phase~4 must reproduce numbers produced by Synergy's simulator (commit \code{1bb2bed}), not numbers
+derived from the paper's prose. The full findings, with file and line references, are in
+\code{docs/validation-plan.md}. The ones that shaped this phase:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lXX@{}}
+\toprule
+Topic & Paper says & Code does (and we follow) \\
+\midrule
+Tune's job order & sort by GPU, then CPU, then memory (\S4.2) & policy order only (FIFO: arrival); a job is
+  tried if its GPUs fit (\code{fifo\_synergy\_new.py}) \\
+Placement of the reference run & best fit & first fit over free GPUs in index order
+  (\code{SYNERGY\_RANDOM}); the placement mode is set by the scheduler's name, not the command line \\
+Progress & continuous & \(\lfloor 300 / \text{iteration time} \rfloor\) whole iterations per round \\
+Finish time & when work ends & at the end of the round the work ends in \\
+Ideal demand & best-case resources & capped at one server, with the speedup re-interpolated \\
+Resources & GPU, CPU, memory & also storage speed, but it equals memory in every config and profile \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The artifact readme also numbers figures differently from the OSDI paper (its ``Fig~8'' for the
+single-GPU FIFO sweep is the paper's Fig.~9); the architecture document follows the readme. The
+validation plan lists both numberings.
+
+%======================================================================
+\section{What was built}
+%======================================================================
+
+\subsection{Throughput model: Synergy's ideal demand}
+A job's ideal demand is its GPUs times the profile's ideal cores and memory per GPU. Following
+\code{jobs/workload.py}:
+\begin{itemize}
+  \item if that exceeds one server, it is capped at the server's size and the speedup is
+        re-interpolated on the straight line between the fixed share (speedup 1) and the ideal point,
+        in cores:
+        \[ s' = 1 + \frac{s - 1}{c_\text{ideal} - c_\text{fair}}\,(c_\text{capped} - c_\text{fair}); \]
+        for a 4-GPU AlexNet job (ideal 48 cores, fair 12, speedup 2.94) capped at 24 cores, \(s' = 1.647\);
+  \item a job with more GPUs than a server gets the fixed share and speedup 1.
+\end{itemize}
+In \code{synergy\_two\_point} mode a job runs at \(s'\) when it holds at least this demand and at 1
+otherwise. Two checks at load time keep this exact: every profile whose ideal demand is at or below the
+fixed share has speedup 1 (so a ``+fair'' job never gets a speedup, as in Synergy), and storage demand
+equals memory demand.
+
+\subsection{Allocation}
+\begin{itemize}
+  \item \code{synergy\_greedy}: the ideal demand; a job that does not fit is skipped this round
+        (Synergy's scheduler without suffix, paper \S3.3).
+  \item \code{synergy\_tune}, a \emph{joint} allocation and placement policy (new plug point
+        \code{JointAllocationPlacement}), following \code{cluster.py} \code{\_tune}:
+        \begin{enumerate}
+          \item skip the job if the cluster has fewer free GPUs than it needs;
+          \item place it at its ideal demand;
+          \item else, if that is above the fixed share in any dimension, drop it to the fixed share and retry;
+          \item else choose servers with enough free GPUs (one server for multi-GPU jobs; otherwise by
+                fewest free GPUs) and shrink co-located jobs to the fixed share, trying jobs on fewer
+                servers first, then most cores per GPU, then most memory per GPU, until the job's share fits;
+          \item place it again; if it still does not fit, Synergy exits, and so does our run.
+        \end{enumerate}
+        Synergy sorts each server's job list in place, so ties between equally ranked peers depend on
+        the order of earlier sorts in the same round; Tune keeps that order per round to match it.
+\end{itemize}
+
+\subsection{Placement}
+\begin{itemize}
+  \item \code{first\_fit} (SOFT by default): Synergy's \code{SYNERGY\_RANDOM}, which is not random:
+        servers in index order, taking from each as many GPUs as still fit with their share of cores
+        and memory. A 1-GPU job lands on the lowest-numbered server that fits; a multi-GPU job may be
+        split.
+  \item \code{consolidated} with \code{locality: soft}: Synergy's \code{SYNERGY\_PLACEMENT}. A multi-GPU
+        job takes the fullest server that fits it whole; otherwise, and always for a 1-GPU job, it takes
+        one GPU at a time from the server with the fewest free GPUs.
+  \item Both split a job \emph{in proportion to its GPUs}: each part gets exactly its GPUs' share of
+        cores and memory (paper \S4.2), via the shared helper \code{Shares}.
+\end{itemize}
+
+\subsection{Lifecycle and Synergy's rounds}
+\code{round\_based} re-allocates every job from scratch each round (the plan starts empty); preemption is
+free, as in Synergy. Its option \code{synergy\_rounds} reproduces Synergy's time exactly:
+\begin{itemize}
+  \item each job's speed is quantised to \(\lfloor \text{round} / t \rfloor\) iterations per round, with
+        \(t\) = iteration time / penalty / speedup computed in Synergy's order, so the floating-point
+        result is identical (e.g. ResNet-18: 468 per round at the fixed share, 1125 at speedup 2.4);
+  \item a job whose work ends inside a round is recorded as finishing at that round's end;
+  \item jobs whose work is done at a round's start are finished before planning, as Synergy ends leases
+        before scheduling.
+\end{itemize}
+It needs periodic rounds only; the setup refuses anything else. On the mean JCT this changes results by
+well under 1\%; it matters for a job-by-job comparison.
+
+\subsection{Orderings}
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Ordering & Key (lowest first), as in \code{schedulers/*\_synergy\_new.py} \\
+\midrule
+\code{srtf} & starved first, remaining time, arrival \\
+\code{las} & starved first, attained service in GPU-seconds, arrival \\
+\code{ftf} & starved first, (time since arrival + remaining time) / whole run time at the fixed share, arrival \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\begin{itemize}
+  \item \emph{Starved}: a job not run for 1000 hours gets priority from the next round on (SRTF and LAS
+        and FTF; see the Phase~4 report: this was first documented wrongly for FTF).
+  \item \emph{Remaining time}: \code{fixed\_share} for ``+fair'' schedulers, \code{current\_or\_ideal} for
+        Greedy and Tune. Synergy sorts \emph{before} resetting speedups, so a job that ran at the fixed
+        share last round is estimated at speedup 1; \code{current\_or\_ideal} reproduces this.
+\end{itemize}
+
+\subsection{The \code{synergy-replica} preset}
+\code{presets/synergy-replica/} runs \code{FIFO+tune}, \code{FIFO+fair} and \code{FIFO} on Synergy's
+cluster with every setting from Synergy's code (round 300\,s, first fit, two-point throughput, penalty
+1, \code{synergy\_rounds}). Its \code{jobs.csv} must be extracted from one Synergy run; this needs all
+jobs of the run, including the 266 unfinished when Synergy stopped, which the extractor in
+\code{tools/} does not yet keep (an open item for its author).
+
+%======================================================================
+\section{Tests}
+%======================================================================
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Test & Checks \\
+\midrule
+capped demand & 4-GPU AlexNet: (4, 24, 500) at speedup 1.647; 16-GPU ResNet-18: fixed share, speedup 1 \\
+first fit vs fullest & a 1-GPU job goes to server 0 under first fit, to the half-full server 1 under SOFT
+  consolidated \\
+proportional split & a 6-GPU job over 3 + 3 free GPUs gets (3, 9, 187.5) on each server; STRICT keeps
+  it on one server \\
+share counting & a server with free GPUs but too few cores is skipped \\
+SOFT spread & with 2, 3, 6 free GPUs a 7-GPU job takes 2, 3 and 2, fullest first \\
+Greedy & the third ResNet-18 needing 9 cores, with 6 left, is skipped \\
+Tune & five 1-GPU ResNet-18 jobs on one server: jobs 1 and 2 get 9 cores, 3 and 4 the fixed share, job 5
+  forces job 1 down to the fixed share; only job 2 keeps speedup 2.4 \\
+Tune skip & a ninth 1-GPU job on 8 GPUs is skipped \\
+SRTF & order flips between fixed-share and ideal estimates, and back when the job ran at the fixed share \\
+LAS, FTF & keys as above, worked by hand \\
+starvation & a 1001-hour-starved job sorts first from the round after it is marked \\
+Synergy rounds & 1000 iterations at 468 per round finish at 900\,s (640\,s continuous); 3000 at 1125
+  per round under Tune at 900\,s (800\,s continuous); exactly 936 finish at 600\,s; an arrival at 10\,s
+  starts at 300\,s; event-driven rounds are refused \\
+preset & synergy-replica's three candidates run end to end; every finish is a multiple of 300\,s; Tune
+  beats the fixed share \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+All existing tests still pass, including the architecture rules (the new helpers \code{Shares},
+\code{Starvation} and \code{RemainingEstimate} live in the policy package; no policy implementation uses
+another). Project total: 261 tests, 0 failures.
+
+%======================================================================
+\section{A first look at scale}
+%======================================================================
+
+As a sanity check, not validation, we generated a trace with the paper's recipe (\S5.1): 128 GPUs,
+single-GPU jobs, Poisson arrivals at 9 jobs per hour, durations at the fixed share of \(10^x\) minutes
+(\(x\) uniform in \([1.5, 3]\) with probability 0.8, else \([3, 4]\)), split (20, 70, 10), 6{,}500 jobs.
+
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Candidate & Mean JCT, jobs 4000--4999 (h) & p99 (h) \\
+\midrule
+FIFO + Tune & 37.1 & 168.7 \\
+FIFO + Greedy & 41.0 & 173.1 \\
+FIFO + fixed share & 103.5 & 232.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The ordering matches the paper (Fig.~9: 22\,h Tune, 81\,h fixed share at 9 jobs per hour): Tune is
+2.8\(\times\) better than the fixed share here, 3.7\(\times\) in the paper. Absolute values differ because
+Synergy's reference workload is not generated from this recipe but built from the Philly trace (a pickle
+shipped with its simulator), and at this load the cluster is near saturation, where small changes in load
+move JCTs strongly. Replaying Synergy's own job list (Phase~4) removes this difference. The three runs
+together took 22\,s (about 11{,}000 rounds each).
+
+%======================================================================
+\section{Next step}
+%======================================================================
+Phase~4: obtain Synergy's job list (one Synergy run plus the extractor option for unfinished jobs), run
+\code{synergy-replica}, and compare with the reference: mean JCT within 10\%, and with
+\code{synergy\_rounds} a job-by-job match. Then the remaining validation steps, the \code{FIFO+fair}
+reference (about 81\,h), and DRF and Tetris.
+
+\end{document}

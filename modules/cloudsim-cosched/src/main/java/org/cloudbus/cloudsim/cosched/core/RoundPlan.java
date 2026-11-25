@@ -83,6 +83,18 @@ public final class RoundPlan {
         return entries.get(jobId);
     }
 
+    /** The active job with this id (read-only view). */
+    public JobInfo job(int jobId) {
+        return requireJob(jobId);
+    }
+
+    /** Free GPUs over the whole cluster after the entries written so far. */
+    public int freeGpus() {
+        int n = 0;
+        for (int s = 0; s < used.length; s++) n += free(s).gpus();
+        return n;
+    }
+
     public boolean contains(int jobId) {
         return entries.containsKey(jobId);
     }

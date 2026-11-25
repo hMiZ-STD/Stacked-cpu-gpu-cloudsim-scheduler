@@ -105,6 +105,7 @@ public final class CoSchedulingBroker extends SimEntity {
     // ---- events ---------------------------------------------------------------------------
 
     private void arrive(int index) {
+        if (index < nextArrival) return;          // already admitted by a round at the same instant
         JobRecord r = workload.get(index);
         double iterTime = r.iterTimeS() != null ? r.iterTimeS()
                 : r.durationS() != null ? 1.0 : rates.throughput().iterationTime(probe(r), firstGroup());
@@ -126,10 +127,39 @@ public final class CoSchedulingBroker extends SimEntity {
     private void jobEnded(int jobId, double time) {
         Job j = active.remove(jobId);
         if (j == null) throw new IllegalStateException("GPU layer reported the end of unknown job " + jobId);
-        j.finish(time);
+        finish(j, time);
+        if (setup.trigger().onJobEnd()) requestRound();
+    }
+
+    private void finish(Job j, double now) {
+        j.finish(now, recordedFinish(now));
         finished.add(j);
         onJobEnd.accept(j);
-        if (setup.trigger().onJobEnd()) requestRound();
+    }
+
+    /** Under Synergy's rounds a job is finished at the end of the round its work ends in; otherwise at once. */
+    private double recordedFinish(double t) {
+        if (!setup.lifecycle().synergyRounds()) return t;
+        double r = setup.trigger().roundS();
+        return Math.ceil((t - 1e-6) / r) * r;
+    }
+
+    /**
+     * Jobs whose work is done but whose end the GPU layer has not reported yet (it ends at this very instant)
+     * are finished now, before planning, as Synergy ends leases before it schedules. Their GPUs are released.
+     */
+    private void finishCompletedJobs(double now) {
+        List<Job> done = new ArrayList<>();
+        for (Job j : active.values())
+            if (j.allocation() != null && j.remainingWork() <= 1e-9 * j.totalWork() + 1e-6) done.add(j);
+        if (done.isEmpty()) return;
+        List<JobCommand> stops = new ArrayList<>();
+        for (Job j : done) stops.add(new JobCommand.Stop(j.id()));
+        executor.apply(stops);
+        for (Job j : done) {
+            active.remove(j.id());
+            finish(j, now);
+        }
     }
 
     private void requestRound() {
@@ -143,6 +173,10 @@ public final class CoSchedulingBroker extends SimEntity {
     private void round(RoundKind kind) {
         if (kind == RoundKind.EVENT) eventRoundPending = false;
         double now = CloudSim.clock();
+        // Jobs arriving at this very instant join this round, as in Synergy, where arrivals come before the
+        // schedule event at equal times (events/cluster_event.py). Their own arrival events are then ignored.
+        while (nextArrival < workload.size() && workload.get(nextArrival).arrivalS() <= now) arrive(nextArrival);
+        finishCompletedJobs(now);
         if (!active.isEmpty()) schedulePlan(now);
         if (kind == RoundKind.PERIODIC) scheduleNextPeriodicRound(now);
     }
@@ -155,11 +189,15 @@ public final class CoSchedulingBroker extends SimEntity {
 
         List<JobInfo> toPlace = new ArrayList<>();
         for (JobInfo j : jobs) if (!plan.contains(j.id())) toPlace.add(j);
-        for (JobInfo j : setup.ordering().order(toPlace, state)) {
-            Allocation a = setup.placement().place(j, g -> setup.allocation().demand(j, g, rates.throughput()), plan);
+        for (JobInfo j : placementOrder(setup.ordering().order(toPlace, state, rates.throughput()), plan)) {
+            Allocation a = setup.joint() != null
+                    ? setup.joint().place(j, plan, setup.placement(), rates.throughput())
+                    : setup.placement().place(j, g -> setup.allocation().demand(j, g, rates.throughput()), plan);
             if (a != null && !plan.assign(j.id(), a))
                 throw new IllegalStateException("placement returned an allocation for job " + j.id() + " that does not fit the plan");
         }
+
+        traceRound(now, plan);
 
         Map<Integer, Allocation> running = new LinkedHashMap<>();
         for (Job j : active.values()) if (j.allocation() != null) running.put(j.id(), j.allocation());
@@ -172,11 +210,11 @@ public final class CoSchedulingBroker extends SimEntity {
             switch (c.kind()) {
                 case STOP -> cmds.add(new JobCommand.Stop(j.id()));
                 case START -> {
-                    RateCalculator.Speed s = rates.speed(j, c.to(), j.iterTimeS());
+                    RateCalculator.Speed s = speed(j, c.to());
                     cmds.add(new JobCommand.Start(j.id(), j.remainingWork(), parts(c.to()), s.rate(), s.gpuBusyFraction()));
                 }
                 case RESIZE -> {
-                    RateCalculator.Speed s = rates.speed(j, c.to(), j.iterTimeS());
+                    RateCalculator.Speed s = speed(j, c.to());
                     cmds.add(new JobCommand.Resize(j.id(), parts(c.to()), s.rate(), s.gpuBusyFraction()));
                 }
             }
@@ -184,6 +222,48 @@ public final class CoSchedulingBroker extends SimEntity {
         executor.apply(cmds);
         commandsApplied += cmds.size();
         for (PlanDiff.Change c : changes) active.get(c.jobId()).setAllocation(c.to(), now);
+    }
+
+    /**
+     * Debug aid: if the system property {@code cosched.planTrace} names a file, every round's plan is appended
+     * to it as {@code R <time>} followed by {@code jobId|server:gpus/cpus/mem;...} per job, in job-id order.
+     * Used to compare plans round by round with another simulator.
+     */
+    private void traceRound(double now, RoundPlan plan) {
+        String file = System.getProperty("cosched.planTrace");
+        if (file == null) return;
+        StringBuilder sb = new StringBuilder("R ").append((long) now).append('\n');
+        plan.entries().entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(e -> {
+            sb.append(e.getKey()).append('|');
+            e.getValue().parts().stream().sorted(java.util.Comparator.comparingInt(Allocation.Part::serverIndex)).forEach(p ->
+                    sb.append(p.serverIndex()).append(':').append(p.resources().gpus()).append('/')
+                            .append(p.resources().cpus()).append('/').append(p.resources().memGb()).append(';'));
+            sb.append('\n');
+        });
+        try {
+            java.nio.file.Files.writeString(java.nio.file.Path.of(file), sb.toString(),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (java.io.IOException ex) {
+            throw new java.io.UncheckedIOException(ex);
+        }
+    }
+
+    /**
+     * The order jobs are placed in. Normally the policy's order. With {@code largestGpuDemandFirst} (Synergy's
+     * LAS+tune): first the jobs that fit the free GPU count, walking the policy's order, then those jobs by
+     * descending GPU demand (stable).
+     */
+    private List<JobInfo> placementOrder(List<JobInfo> ordered, RoundPlan plan) {
+        if (!setup.ordering().largestGpuDemandFirst()) return ordered;
+        int free = plan.freeGpus();
+        List<JobInfo> chosen = new ArrayList<>();
+        for (JobInfo j : ordered)
+            if (j.gpus() <= free) {
+                chosen.add(j);
+                free -= j.gpus();
+            }
+        chosen.sort(java.util.Comparator.comparingInt((JobInfo j) -> -j.gpus()));
+        return chosen;
     }
 
     private void scheduleNextPeriodicRound(double now) {
@@ -198,6 +278,22 @@ public final class CoSchedulingBroker extends SimEntity {
     }
 
     // ---- helpers ----------------------------------------------------------------------------
+
+    /**
+     * The job's speed. Under Synergy's rounds it is quantised to whole iterations per round, computed in the
+     * same order as Synergy ({@code jobs/job.py}: iteration time / penalty / speedup, then
+     * {@code floor(round / that)}), so a full round advances exactly Synergy's number of iterations.
+     */
+    private RateCalculator.Speed speed(Job j, Allocation a) {
+        RateCalculator.Speed s = rates.speed(j, a, j.iterTimeS());
+        if (!setup.lifecycle().synergyRounds()) return s;
+        double round = setup.trigger().roundS();
+        long perRound = rates.iterationsPerRound(j, a, j.iterTimeS(), round);
+        if (perRound <= 0)
+            throw new IllegalStateException("job " + j.id() + " needs more than one " + round + " s round per iteration; "
+                    + "under Synergy's rounds it would never progress");
+        return new RateCalculator.Speed(perRound / round, s.gpuBusyFraction());
+    }
 
     private static List<PartSpec> parts(Allocation a) {
         List<PartSpec> l = new ArrayList<>(a.parts().size());

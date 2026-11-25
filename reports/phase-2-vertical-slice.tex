@@ -213,7 +213,12 @@ Total & 242 \\
 %======================================================================
 Phase~3 adds Synergy's own policies: Greedy and Tune allocation (Tune as a joint allocation and
 placement policy that may shrink co-located jobs through the round plan), the round-based lifecycle,
-SOFT locality, and the SRTF, LAS and FTF orderings, with a \code{synergy-replica} preset. Phase~4 then
-replays Synergy's reference run and must match its mean JCT within 10\%.
+SOFT locality, and the SRTF, LAS and FTF orderings, with a \code{synergy-replica} preset. Reading the
+Synergy paper (\code{docs/validation-plan.md}) adds two requirements that this phase's code does not yet
+meet: a job split over servers must get cores and memory in proportion to its GPUs on each server
+(\S4.2), and Tune chooses its runnable set by GPU demand alone, whereas Greedy, like the current FIFO,
+skips a job that does not fit in every dimension. Phase~4 then replays Synergy's reference run and must
+match its mean JCT within 10\%; that run's 21.88\,h agrees with the roughly 22\,h the paper reports at
+9 jobs per hour (Fig.~9).
 
 \end{document}

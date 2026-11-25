@@ -1,0 +1,22 @@
+# Synergy's FIFO+tune run, replayed (docs/validation-plan.md). jobs.csv and ref_jct.csv come from the same Synergy run.
+name: split333-fifo-tune
+cluster:
+  server_groups:
+    - { name: synergy-v100, count: 16, gpus: 8, gpu_type: V100, cpus: 24, mem_gb: 500, storage_mbps: 500, net_gbps: 0 }
+workload:
+  csv: jobs.csv
+  labeller: { name: from_trace }
+models:
+  profiles_dir: ../../profiles/synergy-v100/models
+  scaling: linear
+  throughput_mode: synergy_two_point
+  locality_penalty: 1.0
+candidates:
+  - name: split333-fifo-tune
+    trigger:    { name: periodic, params: { round_s: 300 } }
+    ordering:   { name: fifo }
+    allocation: { name: synergy_tune }
+    placement:  { name: first_fit }
+    lifecycle:  { name: round_based, params: { synergy_rounds: true } }
+seeds: [42]
+output_dir: ../../../out/synergy-validation/split333-fifo-tune

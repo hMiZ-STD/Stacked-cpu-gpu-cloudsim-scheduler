@@ -48,6 +48,20 @@ public final class RateCalculator {
         return new Speed(rate, throughput.gpuBusyFraction(job, alloc.total(), g));
     }
 
+    /**
+     * Whole iterations a job advances in one round of {@code roundS} seconds, as Synergy's simulator computes
+     * it ({@code jobs/job.py, allocate}): iteration time, divided by the placement penalty if spread, divided by
+     * the speedup, then {@code floor(round / iteration time)}. Same operation order, so the same floating-point result.
+     */
+    public long iterationsPerRound(JobInfo job, Allocation alloc, double iterationTimeS, double roundS) {
+        ServerGroup g = groupOf(alloc);
+        double t = iterationTimeS;
+        if (alloc.isSpread()) t = t / locality.penalty();
+        t = t / interference.factor(job, alloc);
+        t = t / throughput.speedup(job, alloc.total(), g);
+        return (long) Math.floor(roundS / t);
+    }
+
     /** The server group of an allocation; rejects allocations that span groups. */
     public ServerGroup groupOf(Allocation alloc) {
         ServerGroup g = null;
