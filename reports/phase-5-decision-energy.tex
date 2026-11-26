@@ -1,0 +1,333 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, breaklines=true, frame=single,
+  framerule=0.3pt, rulecolor=\color{black!30}, backgroundcolor=\color{black!3}, showstringspaces=false}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{CPU--GPU Co-Scheduling Module for CloudSim 7G\\[4pt]
+\large Phase 5 Report: Energy and CO$_2$, Comparisons and the Decision Report}
+\author{Chirag \and Hamiz}
+\date{26 November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Phases 0--4 built a simulator that reproduces Synergy's simulator job for job. Phase~5 turns it into the
+decision tool the architecture describes. Each run now measures cluster utilisation and, when power inputs are
+given, IT and facility energy, CO$_2$, energy per job and per training sample, and the energy drawn by GPUs that
+are idle or waiting for data; these integrals are exact, because power only changes when the schedule does.
+A seeded Poisson workload generator makes seeds meaningful, sweeps answer what-if questions such as
+``24 or 32 cores per server?'', and a \code{ComparisonRunner} runs every candidate $\times$ seed $\times$ sweep
+value. A \code{DecisionReport} then ranks candidates per metric and by the researcher's weights, marks the
+trade-offs, says whether each lead is clear or within the noise between seeds, flags leaders that change across
+sweep values, lists every assumption, and writes everything as LaTeX tables and CSV. Power numbers have no
+defaults: every value must be written in the experiment file with its source. A Maven wrapper and a
+\code{./cosched} script make the project run from a fresh clone with only Java installed. All 290 tests pass,
+and the Synergy validation still matches exactly.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{What was added}
+%======================================================================
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Piece & What it does \\
+\midrule
+\code{PowerSettings}, \code{energy} section & Power inputs per server group and PUE / grid factor, all required with sources \\
+\code{ClusterMeter} (L5) & The architecture's EnergyListener plus utilisation: exact integrals over the run, \code{timeline.csv} \\
+\code{PoissonWorkload} (L3) & Seeded arrivals at a given load; jobs from Synergy's synthetic recipe or resampled from a trace \\
+\code{workload.measure} & JCT statistics over a window of job ids (steady state), as Synergy measures \\
+\code{Sweeps} & What-if axes: set any value in the YAML, several settings together if needed \\
+\code{ComparisonRunner} (L5) & Validates every sweep point, then runs candidates $\times$ seeds $\times$ sweep values \\
+\code{MetricCatalog}, \code{DecisionReport} (L5) & Per-metric ranks, weighted score, Pareto set, stability, LaTeX + CSV \\
+\code{./mvnw}, \code{./cosched} & Build with only Java 21; one command runs an experiment and its report \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The GPU layer gained one thing: \code{ServerStatus} now reports the CPU and GPU parts of a server's power as well
+as the total. Scheduling is unchanged; the broker only gained a listener that is called after every change to
+what runs where.
+
+%======================================================================
+\section{Energy and CO$_2$}
+%======================================================================
+
+\subsection{Model}
+As in the architecture document,
+\begin{equation*}
+E_{\text{IT}} = \sum_{\text{servers}} \int \Big( P_{\text{CPU}}(u_{\text{CPU}}) + \sum_{\text{GPUs}} P_{\text{GPU}}(u_{\text{GPU}})
+  + P_{\text{base}} \Big)\, dt, \qquad E_{\text{facility}} = E_{\text{IT}} \times \text{PUE}, \qquad
+\text{CO}_2 = E_{\text{facility}} \times \text{grid factor}.
+\end{equation*}
+$u_{\text{CPU}}$ is the share of cores allocated (allocated cores are assumed busy). A GPU's busy fraction is its
+job's speedup divided by its speedup at the ideal allocation, where the ideal is capped at one server as Synergy
+caps it. $P_{\text{CPU}}$ is linear from idle to maximum, or one of CloudSim's SPECpower tables;
+$P_{\text{GPU}}$ is linear; idle servers stay on.
+
+\subsection{Why the integral is exact}
+Allocations, busy fractions and therefore power change only when a plan is applied or a job ends. The broker
+calls the meter at exactly those moments, and the meter multiplies the power held since the previous call by
+the time elapsed. There is no sampling interval to choose and no approximation; the run's window is
+$[0, \text{makespan}]$.
+
+\subsection{Where GPU energy goes}
+A GPU busy a fraction $u$ of the time draws idle power while waiting and maximum power while computing, so
+$(1-u)\,P_{\text{idle}}$ of its power is spent waiting. The meter splits that waiting energy into
+\emph{idle} (no job holds the GPU) and \emph{stalled} (a job holds it but is starved of CPU or memory, so the GPU
+waits for data). Stalled energy is what CPU-aware scheduling can remove.
+
+\subsection{No defaults, every number with a source}
+Energy is modelled only when the YAML has an \code{energy} section, and then every server group must have a
+\code{power} section. Each number must be written, and a \code{source} field must say where the numbers come from:
+\begin{lstlisting}
+power: { cpu_model: linear, cpu_idle_w: 100, cpu_max_w: 300, gpu_idle_w: 50, gpu_max_w: 300, base_w: 200,
+         source: "PLACEHOLDER values, not measured ..." }
+energy: { pue: 1.54, pue_source: "...", grid_g_co2_per_kwh: 727, grid_source: "..." }
+\end{lstlisting}
+A missing number, a missing source, power without an \code{energy} section, or idle/max watts given together with
+a SPECpower table are errors before the run. The sources appear in the manifest and in the report's assumptions,
+so a placeholder can never pass for a measurement. The demo preset uses clearly labelled placeholders; PUE 1.54
+and 727\,gCO$_2$/kWh are the values the architecture document cites (Uptime Institute 2025; CEA v20.0).
+
+\subsection{Metrics}
+IT and facility energy (kWh), CO$_2$ (kg), mean IT power, energy per finished job, energy per training sample
+(iterations $\times$ the profile's \code{batch\_size}), and the shares of IT energy drawn by CPUs, by GPUs, by idle
+GPUs and by stalled GPUs. Utilisation, measured in every run: time-averaged GPUs allocated, GPUs busy and cores
+allocated.
+
+\subsection{Check by hand}
+One 8-GPU, 24-core server; CPU 100--300\,W, GPU 50--250\,W, base 100\,W. A transformer job holds all 8 GPUs and 24
+cores for 100\,s with fully busy GPUs (2400\,W). Then a ResNet-18 job holds 4 GPUs and 12 cores for 100\,s at the
+fixed share. Its ideal (9 cores per GPU, 36 cores) is more than a server has, so it is capped at 6 cores per GPU,
+speedup 1.75: its GPUs are busy $1/1.75$ of the time. The power is
+$200 + 4(50 + 200/1.75) + 4 \times 50 + 100 = 1157.1$\,W. The test checks IT and facility energy, CO$_2$, energy
+per job and per sample, the idle, stalled and CPU shares, and the three utilisations against this calculation.
+Writing the test first with an uncapped busy fraction ($1/2.4$) gave a 3.6\% mismatch; the code was right,
+because it applies Synergy's cap, and the test was corrected.
+
+%======================================================================
+\section{A seeded workload}
+%======================================================================
+
+Replaying a fixed trace gives the same result for every seed, so seeds had no effect. The \code{poisson}
+generator draws arrivals as Synergy does (\code{helpers/utils.py}): each gap is
+$\lceil -\ln(1-U)/\lambda \times 3600 \rceil$ whole seconds at $\lambda$ jobs per hour. What each job is comes
+from one of two sources:
+\begin{itemize}
+  \item \code{synthetic}: Synergy's synthetic recipe. Run time at the fixed share is $60 \times 10^{U(1.5,3)}$\,s
+        with probability 0.8, else $60 \times 10^{U(3,4)}$\,s; GPUs are 1, or Synergy's multi-GPU mix (1: 70\%,
+        2: 10\%, 4: 15\%, 8: 5\%). Models come from the labeller.
+  \item \code{resample}: each job copies the GPUs, work and model of a random row of a job CSV. Resampling
+        Synergy's reference job list gives the Philly-derived durations its paper uses.
+\end{itemize}
+The load and the job count are required: they define the experiment. For a given seed every candidate runs on
+the same jobs (common random numbers), so differences between candidates are paired. The jobs are written to
+each run's \code{workload.csv}, so any run can be replayed exactly. \code{workload.measure} restricts the JCT
+statistics to a window of job ids, the steady state, as Synergy measures jobs 4000--4999; energy and utilisation
+always cover the whole run.
+
+%======================================================================
+\section{Sweeps and the comparison runner}
+%======================================================================
+
+A sweep sets one value in the YAML tree to each of its values in turn; several sweeps multiply. Because it
+edits the YAML, anything written there can be swept: a cluster dimension, a policy parameter, the load. Some
+settings must change together. More cores per server also need profiles normalised to that server's fixed
+share (Synergy's \code{models-4} for 32 cores), so one sweep can set several paths:
+\begin{lstlisting}
+sweeps:
+  - name: cpus
+    paths: [cluster.server_groups.0.cpus, models.profiles_dir]
+    values: [[24, ../profiles/synergy-v100/models], [32, ../profiles/synergy-v100/models-4]]
+\end{lstlisting}
+\code{ComparisonRunner} expands the sweeps and validates every combination before the first run: a wrong path,
+a misspelt key or a bad value stops the study at once rather than after an hour of simulation. It then runs
+every candidate $\times$ seed at every point, under \code{out/<experiment>/<point>/<candidate>/seed-<seed>/}, and
+writes the report. Runs are sequential, since CloudSim keeps its simulation state in static fields.
+
+%======================================================================
+\section{The decision report}
+%======================================================================
+
+The architecture asks for a report that ``ranks policies per metric, shows trade-offs, and flags rankings that
+change across seeds or load levels instead of naming a single winner''. Each piece:
+
+\paragraph{Metric catalogue.} Every metric has a unit, a print format, a meaning, and a direction (lower better,
+higher better, or none). Two metrics that look rankable are shown only as context: \emph{GPUs allocated} and
+\emph{idle-GPU energy}. In the first demo run the GPU-proportional baseline ``won'' both, only because its jobs
+run slowly and hold their GPUs longer. Ranking them would reward slowness.
+
+\paragraph{Per-metric ranks} by mean over seeds, with the 95\% confidence interval of each mean.
+
+\paragraph{Weighted score.} For each objective, a candidate's \emph{regret} is how much worse its mean is than
+the best candidate's, relative to the best: $(x - x_{\text{best}})/|x_{\text{best}}|$ for lower-is-better metrics
+(when the best is 0, the gap is divided by the range). The score is the weighted mean regret: 0\% means best on
+every objective, and 10\% means 10\% worse than the best on weighted average. Unlike a rank, this keeps the size of
+a gap. Without objectives in the YAML there is no weighted ranking: the tool does not choose weights for the
+researcher.
+
+\paragraph{Trade-offs.} A candidate is Pareto-optimal if no other candidate is at least as good on every
+objective and better on one.
+
+\paragraph{Stability across seeds.} For each metric: the leader by mean; the seeds on which it is also best; and
+the gap to the runner-up as a paired 95\% $t$-interval over seeds. The verdict is \emph{clear} if the interval
+excludes 0, \emph{same order on every seed, size uncertain} if the leader wins every seed but the gap varies too
+much to pin down, and \emph{within seed noise} otherwise (a tie at this number of seeds).
+
+\paragraph{Stability across sweep values.} The leader of every metric at every point, with metrics whose leader
+changes marked: for those, the answer to the what-if question is ``it depends''.
+
+\paragraph{Outputs.} \code{decision-report.tex} (standalone, compiles with pdflatex) with the candidates table,
+per point the metrics, ranking and stability tables, the sweep table, the assumptions and the metric definitions.
+Each table is also its own file under \code{tables/} for use in other documents. Every number is in
+\code{runs.csv}, \code{summary.csv}, \code{ranking.csv}, \code{stability.csv} and \code{sweep\_stability.csv}.
+
+%======================================================================
+\section{Demonstration: \code{presets/decision-demo}}
+%======================================================================
+
+A small what-if study built from the same plug-ins as the replication. Four Synergy-shaped servers (8 V100,
+500\,GB) with 24 or 32 cores; Poisson arrivals at 2.25 jobs per hour (Synergy's 9 per hour scaled to a quarter of
+its cluster), 1500 jobs resampled from Synergy's reference job list, JCTs over jobs 500--1199; candidates FIFO with
+the fixed share, Greedy and Tune, and SRTF with Tune; 5 seeds; objectives mean JCT (weight 2), p99 JCT (1) and
+energy per job (1). The 40 runs take 25\,s.
+
+\begin{center}
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Cores & Candidate & Mean JCT (h) & p99 JCT (h) & kWh per job & Score \\
+\midrule
+24 & fifo-fair   & $55.8 \pm 23.1$ & $182 \pm 32$ & $8.66$ & 136.9\% \\
+24 & fifo-greedy & $24.3 \pm 13.0$ & $146 \pm 23$ & $8.25$ & 28.2\% \\
+24 & fifo-tune   & $23.7 \pm 13.2$ & $146 \pm 23$ & $8.24$ & 26.3\% \\
+24 & srtf-tune   & $15.5 \pm 3.1$  & $183 \pm 63$ & $8.24$ & 6.4\% \\
+\midrule
+32 & fifo-fair   & $39.0 \pm 19.3$ & $161 \pm 29$ & $8.55$ & 82.4\% \\
+32 & fifo-greedy & $21.5 \pm 12.0$ & $144 \pm 21$ & $8.15$ & 20.6\% \\
+32 & fifo-tune   & $21.5 \pm 11.9$ & $144 \pm 22$ & $8.15$ & 20.6\% \\
+32 & srtf-tune   & $15.2 \pm 2.7$  & $184 \pm 63$ & $8.14$ & 7.0\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+What the report says, and what it does not:
+\begin{itemize}
+  \item CPU-aware allocation matters most where CPUs are scarce: with 24 cores, Tune's mean JCT is 58\% lower
+        than the fixed share's; with 32 cores the fixed share improves by 30\% and the gap narrows.
+  \item SRTF+Tune has the lowest mean JCT on every seed, but the size of its lead varies (``same order on every
+        seed, size uncertain''). It also has the worst p99, as shortest-first scheduling is expected to. The
+        report keeps that trade-off visible: SRTF, FIFO+Tune and Greedy are all Pareto-optimal, and only the fixed
+        share is dominated.
+  \item Tune and Greedy are within seed noise of each other at this load.
+  \item Energy per job differs by under 6\% between candidates, and its leader is within noise. With idle servers
+        kept on, a run's energy is set mostly by its length, which the last arrival fixes. The energy columns are
+        context here, not a differentiator. The power numbers are placeholders, and the report says so.
+  \item The p99.9 leader changes from FIFO+Tune (24 cores) to Greedy (32 cores); the sweep table flags it.
+\end{itemize}
+
+%======================================================================
+\section{Running it}
+%======================================================================
+
+\begin{lstlisting}
+git clone https://github.com/hMiZ-STD/Stacked-cpu-gpu-cloudsim-scheduler
+cd Stacked-cpu-gpu-cloudsim-scheduler
+./mvnw install                                       # Java 21 only; Maven 3.9.9 is downloaded
+./cosched presets/decision-demo/decision-demo.yaml   # report: out/decision-demo/report/
+\end{lstlisting}
+\code{./cosched} rebuilds when sources have changed, builds the classpath once, and prints a short summary;
+a mistake in the YAML gives a one-line error instead of a stack trace. The format of every new YAML section and
+output file is in \code{docs/formats.md}.
+
+%======================================================================
+\section{Tests}
+%======================================================================
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+Test & Checks \\
+\midrule
+\code{EnergyTest} (4) & The hand calculation above; no energy metrics without an \code{energy} section, utilisation
+  still measured; each missing number, missing source and invalid combination rejected; a SPECpower CPU table
+  (IBM x3550, 222\,W at full load) integrates correctly. \\
+\code{PoissonWorkloadTest} (6) & Same seed same jobs, other seed other jobs; mean gap 400\,s at 9 jobs/hour, whole
+  seconds; duration bounds, 20\% long jobs, the GPU mix; resampling copies rows; a written workload reads back
+  exactly; load and job count required, unused parameters rejected. \\
+\code{SweepsTest} (4) & Nested keys, list positions and \code{*}; bad paths; a misspelt key caught by validation;
+  product order and labels; several paths together; the original tree untouched. \\
+\code{DecisionReportTest} (9) & Mean, sd and CI; ranks; regret scores and the Pareto set worked by hand; all
+  three verdicts; one seed; missing runs; leader change across sweep values; every file written, balanced braces,
+  LaTeX escaping; unknown or unrankable objectives rejected before running. \\
+\code{ComparisonRunnerTest} (3) & $2 \times 2 \times 2$ runs with every file; one workload per seed shared by all
+  candidates; the sweep changes the load; measured window; a bad sweep fails before any run; the single-run entry
+  point refuses sweeps. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{center}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Module & Tests (all passing) \\
+\midrule
+\code{cloudsim} (unchanged) & 167 \\
+\code{cloudsim-examples} & 13 \\
+\code{cloudsim-gpu} & 16 \\
+\code{cloudsim-cosched} & 94 (1 skipped: the opt-in Synergy suite) \\
+\midrule
+Total & 290 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The step-0 Synergy validation runs in every build and still matches exactly. The opt-in six-configuration subset
+of the Phase~4 suite was rerun after these changes and passes (every measured job exact), so the new hooks
+changed no scheduling decision.
+
+%======================================================================
+\section{Scope decisions and limits}
+%======================================================================
+
+\paragraph{Teams, quotas and fairness are out of this phase.} The configuration accepts teams and quotas and the
+job CSV has a team column, but no policy uses them yet. Three reasons. It is a separate research question:
+this project is about how many cores each job gets, while fair sharing between teams decides which team's jobs run,
+and other work studies that (Themis, Gandiva-fair). It could not be validated: Synergy, the reference, has no
+teams, and every result so far rests on an exact match. And it needs no redesign: a fair-share ordering is one new
+policy class and one registry line. It is planned as an extension.
+
+\paragraph{DRF and Tetris} (Synergy's Fig.~13) are the next policies. DRF is also the test of the
+architecture's claim that a policy is one class plus one registry line with no other change, so it is assigned
+to Hamiz, who did not write the pipeline, and will be validated against Synergy's simulator like the others.
+
+\paragraph{Limits, stated in every report.} The power numbers in the presets are placeholders. A straight line to
+rated maximum overestimates GPU power. The GPU busy fraction from throughput is our assumption. Idle servers stay
+on, and grid carbon is constant. No published paper exists to validate the energy numbers against, so they are
+for comparing schedulers, not for reading as measurements. No interference between co-located jobs is modelled.
+
+%======================================================================
+\section{Next step}
+%======================================================================
+Phase~6: DRF and Tetris, validated against Synergy (Fig.~13); real power inputs with sources (spec sheets and a
+SPECpower result for the servers); and our own studies on the Philly trace with its real arrivals (Fig.~6) and on
+newer traces, using the comparison runner and the decision report.
+
+\end{document}

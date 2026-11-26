@@ -1,6 +1,7 @@
 package org.cloudbus.cloudsim.cosched.metrics;
 
 import org.cloudbus.cloudsim.cosched.broker.Job;
+import org.cloudbus.cloudsim.cosched.config.ExperimentConfig;
 import org.cloudbus.cloudsim.cosched.core.Allocation;
 
 import java.io.IOException;
@@ -63,17 +64,28 @@ public final class JobMetrics {
         }
     }
 
-    /** Mean, p99, p99.9 JCT (hours, Synergy's summary) and mean queueing delay (s). */
+    /** Mean, p99, p99.9 JCT (hours, Synergy's summary) and mean queueing delay (s), over all jobs. */
     public Map<String, Object> summary() {
+        return summary(null);
+    }
+
+    /**
+     * Same, with JCT and queueing statistics over the jobs {@code measure} covers (all when null), as Synergy
+     * measures jobs 4000-4999. {@code jobs} counts every finished job and the makespan covers the whole run.
+     */
+    public Map<String, Object> summary(ExperimentConfig.Measure measure) {
         Map<String, Object> s = new LinkedHashMap<>();
         s.put("jobs", rows.size());
+        List<Row> m = measure == null ? rows : rows.stream().filter(r -> measure.covers(r.jobId())).toList();
+        if (measure != null) s.put("jobs_measured", m.size());
         if (rows.isEmpty()) return s;
-        double[] jct = rows.stream().mapToDouble(Row::jctS).sorted().toArray();
+        s.put("makespan_s", rows.stream().mapToDouble(Row::finishS).max().orElse(0));
+        if (m.isEmpty()) return s;
+        double[] jct = m.stream().mapToDouble(Row::jctS).sorted().toArray();
         s.put("mean_jct_h", Arrays.stream(jct).average().orElse(0) / 3600);
         s.put("p99_jct_h", percentile(jct, 99) / 3600);
         s.put("p99.9_jct_h", percentile(jct, 99.9) / 3600);
-        s.put("mean_queue_s", rows.stream().mapToDouble(Row::queueS).average().orElse(0));
-        s.put("makespan_s", rows.stream().mapToDouble(Row::finishS).max().orElse(0));
+        s.put("mean_queue_s", m.stream().mapToDouble(Row::queueS).average().orElse(0));
         return s;
     }
 

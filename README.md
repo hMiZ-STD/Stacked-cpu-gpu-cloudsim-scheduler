@@ -27,7 +27,8 @@ Training jobs need CPU cores to decode and prepare data for the GPU. Most schedu
 | `custom_log.properties` | Logging config read by some CloudSim examples; must stay in the repository root |
 | `reports/` | One LaTeX report per implementation phase |
 | `tools/` | Python tools: Synergy profile converter, job extractor, Philly prep, run comparator; `synergy_validation/` reruns the Phase 4 references |
-| `presets/` | Converted profiles, Synergy reference JCTs, experiment presets (`smoke/`, `synergy-replica/`), Synergy validation suite (`synergy-validation/`) |
+| `presets/` | Converted profiles, Synergy reference JCTs, experiment presets (`smoke/`, `synergy-replica/`, `decision-demo/`), Synergy validation suite (`synergy-validation/`) |
+| `cosched`, `mvnw` | Run script for experiments; Maven wrapper (no Maven install needed) |
 | `docs/archive/` | Earlier planning notes (CloudSim Plus era), superseded by the CloudSim 7G architecture |
 
 ## Architecture (five layers)
@@ -40,22 +41,26 @@ Training jobs need CPU cores to decode and prepare data for the GPU. Most schedu
 
 ## Build
 
-Requires Java 21 and Maven 3.9+.
+Requires Java 21 only: `./mvnw` downloads Maven 3.9.9 on first use (or use your own Maven 3.9+ as `mvn`).
 
 ```bash
-mvn install          # builds every module and runs all tests
+./mvnw install       # builds every module and runs all tests (about 2 minutes)
 ```
 
 ## Run an experiment
 
 ```bash
-mvn install -DskipTests
-mvn -q -pl modules/cloudsim-cosched dependency:build-classpath -Dmdep.outputFile=cp.txt
-java -cp "modules/cloudsim-cosched/target/classes:$(cat cp.txt)" \
-    org.cloudbus.cloudsim.cosched.metrics.ExperimentRunner presets/smoke/smoke.yaml
+./cosched presets/smoke/smoke.yaml                    # 20 jobs, two candidates, about a second
+./cosched presets/synergy-replica/synergy-replica.yaml # Synergy's reference run: Tune vs fixed share vs Greedy
+./cosched presets/decision-demo/decision-demo.yaml     # 4 schedulers x 5 seeds x {24, 32} cores, with energy (about 30 s)
 ```
 
-Results go to `out/<experiment>/<candidate>/seed-<seed>/jobs.csv` and `manifest.json`. File formats: [docs/formats.md](docs/formats.md).
+`./cosched` builds the project when sources have changed, runs every candidate × seed × sweep value, and writes:
+
+- per run, `out/<experiment>/[<sweep point>/]<candidate>/seed-<seed>/`: `jobs.csv` (one row per job), `timeline.csv` (utilisation and power at every change), `manifest.json` (inputs with hashes, every resolved parameter, assumptions, summary), and `workload.csv` for generated workloads;
+- the **decision report** in `out/<experiment>/report/`: `decision-report.tex` (compile with pdflatex), its tables in `tables/*.tex` to `\input` elsewhere, and every number as CSV (`runs.csv`, `summary.csv`, `ranking.csv`, `stability.csv`, `sweep_stability.csv`).
+
+File formats, including the energy, generator, sweep and report sections of the YAML: [docs/formats.md](docs/formats.md).
 
 ## Status
 
@@ -68,3 +73,5 @@ Results go to `out/<experiment>/<candidate>/seed-<seed>/jobs.csv` and `manifest.
 | 2 | Vertical slice: broker, FIFO, fixed share, STRICT placement, first end-to-end run | Done ([report](reports/phase-2-vertical-slice.tex)) |
 | 3 | Synergy Greedy / Tune, first-fit and SOFT placement, round-based lifecycle, SRTF / LAS / FTF, `synergy-replica` preset | Done ([report](reports/phase-3-synergy-policies.tex)) |
 | 4 | Validation against Synergy's simulator: 31 configurations, every measured job exact | Done ([report](reports/phase-4-validation.tex)) |
+| 5 | Energy and CO₂, seeded workload generator, sweeps, ComparisonRunner and DecisionReport, `./mvnw` and `./cosched` | Done ([report](reports/phase-5-decision-energy.tex)) |
+| 6 | DRF and Tetris orderings (validated against Synergy, Fig 13); our own experiments | Planned |

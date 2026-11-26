@@ -169,7 +169,18 @@ public class GpuHost extends PowerHost {
     /** Current server power in watts, or NaN when the shape has no power spec. */
     public double powerW() {
         if (cpuPower == null) return Double.NaN;
-        double p = cpuPower.getPower(cpuUtilisation()) + baseW;
+        return cpuPowerW() + gpuPowerW() + baseW;
+    }
+
+    /** The CPU's power now, or NaN without a power spec. */
+    public double cpuPowerW() {
+        return cpuPower == null ? Double.NaN : cpuPower.getPower(cpuUtilisation());
+    }
+
+    /** All GPUs' power now, or NaN without a power spec. */
+    public double gpuPowerW() {
+        if (gpuPower == null) return Double.NaN;
+        double p = 0;
         for (Gpu g : gpus.gpus()) p += gpuPower.getPower(g.busyFraction());
         return p;
     }
@@ -181,7 +192,8 @@ public class GpuHost extends PowerHost {
     }
 
     public ServerStatus status() {
-        return new ServerStatus(shape.index(), usedGpus(), usedCpus, usedMem, cpuUtilisation(), gpuUtilisation(), powerW());
+        return new ServerStatus(shape.index(), usedGpus(), usedCpus, usedMem, cpuUtilisation(), gpuUtilisation(), powerW(),
+                cpuPowerW(), gpuPowerW());
     }
 
     private void checkFits(double cpus, double mem, int guestId) {

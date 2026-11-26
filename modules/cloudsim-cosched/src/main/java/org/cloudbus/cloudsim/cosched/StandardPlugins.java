@@ -23,6 +23,8 @@ import org.cloudbus.cloudsim.cosched.policy.impl.Triggers;
 import org.cloudbus.cloudsim.cosched.workload.ClassSplitLabeler;
 import org.cloudbus.cloudsim.cosched.workload.FromTraceLabeler;
 import org.cloudbus.cloudsim.cosched.workload.ModelLabeler;
+import org.cloudbus.cloudsim.cosched.workload.PoissonWorkload;
+import org.cloudbus.cloudsim.cosched.workload.WorkloadGenerator;
 
 import java.util.List;
 
@@ -74,6 +76,19 @@ public final class StandardPlugins {
         r.register(ModelLabeler.class, "class_split", p -> {
             List<Double> s = p.getDoubleList("split", List.of(34.0, 33.0, 33.0), 3, 0, 100);
             return ClassSplitLabeler.synergy(s.get(0), s.get(1), s.get(2));
+        });
+
+        // Workload generators. No default load or job count: they define the experiment, so they must be written.
+        // source synthetic = Synergy's synthetic recipe (helpers/utils.py); resample = rows drawn from a job CSV.
+        r.register(WorkloadGenerator.class, "poisson", p -> {
+            double jph = p.requireDouble("jobs_per_hour", 1e-6, 1e6);
+            int jobs = p.requireInt("jobs", 1, 10_000_000);
+            if (p.getChoice("source", "synthetic", List.of("synthetic", "resample")).equals("synthetic"))
+                return PoissonWorkload.synthetic(jph, jobs, p.getChoice("gpus", "single", List.of("single", "synergy_mix"))
+                        .equals("single") ? PoissonWorkload.GpuMix.SINGLE : PoissonWorkload.GpuMix.SYNERGY_MIX);
+            String csv = p.getString("resample_csv", null);
+            if (csv == null) throw new IllegalArgumentException("poisson generator: source resample needs resample_csv");
+            return PoissonWorkload.resample(jph, jobs, csv);
         });
         return r;
     }

@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.DoubleConsumer;
 
 /**
  * The scheduler's event loop. Jobs arrive from the workload; each scheduling round it builds a
@@ -57,6 +58,7 @@ public final class CoSchedulingBroker extends SimEntity {
     private boolean eventRoundPending;
     private int rounds;
     private long commandsApplied;
+    private DoubleConsumer onStateChange = t -> { };
 
     public CoSchedulingBroker(String name, GpuLayer layer, ClusterSpec spec, Organisation organisation,
                               List<JobRecord> labelledJobs, SchedulerSetup setup, RateCalculator rates,
@@ -81,6 +83,15 @@ public final class CoSchedulingBroker extends SimEntity {
         if (tooBig > 0)
             throw new IllegalArgumentException(tooBig + " job(s) need more than " + limit + " GPUs, which this placement can never "
                     + "place (largest server: " + maxPerServer + " GPUs). Filter them out (tools/prep_philly.py --strict) or use SOFT locality.");
+    }
+
+    /**
+     * Called with the simulation time after every change to what runs where (each applied plan and each job
+     * end). Utilisation and power only change at these moments, so a listener that samples the cluster here
+     * integrates energy exactly.
+     */
+    public void setStateListener(DoubleConsumer listener) {
+        this.onStateChange = listener;
     }
 
     @Override
@@ -128,6 +139,7 @@ public final class CoSchedulingBroker extends SimEntity {
         Job j = active.remove(jobId);
         if (j == null) throw new IllegalStateException("GPU layer reported the end of unknown job " + jobId);
         finish(j, time);
+        onStateChange.accept(time);
         if (setup.trigger().onJobEnd()) requestRound();
     }
 
@@ -160,6 +172,7 @@ public final class CoSchedulingBroker extends SimEntity {
             active.remove(j.id());
             finish(j, now);
         }
+        onStateChange.accept(now);
     }
 
     private void requestRound() {
@@ -222,6 +235,7 @@ public final class CoSchedulingBroker extends SimEntity {
         executor.apply(cmds);
         commandsApplied += cmds.size();
         for (PlanDiff.Change c : changes) active.get(c.jobId()).setAllocation(c.to(), now);
+        onStateChange.accept(now);
     }
 
     /**

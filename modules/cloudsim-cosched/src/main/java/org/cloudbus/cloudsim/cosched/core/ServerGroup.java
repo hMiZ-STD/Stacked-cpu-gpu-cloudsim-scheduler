@@ -5,6 +5,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 /**
  * A group of identical servers, as written in the experiment YAML:
  * <pre>{ name: legacy-v100, count: 16, gpus: 8, gpu_type: V100, cpus: 24, mem_gb: 500, storage_mbps: 500, net_gbps: 40 }</pre>
+ *
+ * @param power the servers' power inputs ({@link PowerSettings}); null when energy is not modelled
  */
 public record ServerGroup(
         String name,
@@ -14,7 +16,14 @@ public record ServerGroup(
         double cpus,
         @JsonProperty("mem_gb") double memGb,
         @JsonProperty("storage_mbps") double storageMbps,
-        @JsonProperty("net_gbps") double netGbps) {
+        @JsonProperty("net_gbps") double netGbps,
+        PowerSettings power) {
+
+    /** A server group without power inputs (energy not modelled). */
+    public ServerGroup(String name, int count, int gpus, String gpuType, double cpus, double memGb,
+                       double storageMbps, double netGbps) {
+        this(name, count, gpus, gpuType, cpus, memGb, storageMbps, netGbps, null);
+    }
 
     public ServerGroup {
         require(name != null && !name.isBlank(), "server group needs a name");
@@ -25,6 +34,11 @@ public record ServerGroup(
         require(memGb > 0, "server group '" + name + "': mem_gb must be > 0");
         require(storageMbps >= 0, "server group '" + name + "': storage_mbps must be >= 0");
         require(netGbps >= 0, "server group '" + name + "': net_gbps must be >= 0");
+    }
+
+    /** The same group with other power inputs. */
+    public ServerGroup withPower(PowerSettings p) {
+        return new ServerGroup(name, count, gpus, gpuType, cpus, memGb, storageMbps, netGbps, p);
     }
 
     /** Resources of one server in this group. */

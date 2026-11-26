@@ -1,0 +1,89 @@
+# Decision-report demo: "which scheduler, and do 32-core servers change the answer?"
+#
+# Not a replication: a small what-if study built from the same plug-ins.
+#   - 4 Synergy-shaped servers (8 V100, 500 GB), 24 or 32 cores each (sweep).
+#   - Poisson arrivals at 2.25 jobs/hour (Synergy's 9 jobs/hour scaled to a quarter of its cluster); each job's
+#     model and work are drawn from Synergy's reference job list, i.e. the Philly-derived durations Synergy
+#     uses. 5 seeds = 5 different workloads; every candidate runs on the same 5.
+#   - JCTs are measured on jobs 500-1199 (steady state); energy and utilisation cover the whole run.
+#
+# Run:  ./mvnw -q install -DskipTests
+#       java -cp "modules/cloudsim-cosched/target/classes:$(cat modules/cloudsim-cosched/target/classpath.txt)" \
+#            org.cloudbus.cloudsim.cosched.metrics.ComparisonRunner presets/decision-demo/decision-demo.yaml
+# Report: out/decision-demo/report/decision-report.tex (and CSVs next to it)
+#
+# POWER NUMBERS ARE PLACEHOLDERS. The code has no defaults; these values only make the demo run, and every report
+# prints their source. Replace them with cited values (spec sheets, SPECpower results, measurements) before
+# reading anything into the energy rows.
+name: decision-demo
+cluster:
+  server_groups:
+    - name: v100-server
+      count: 4
+      gpus: 8
+      gpu_type: V100
+      cpus: 24
+      mem_gb: 500
+      storage_mbps: 500
+      net_gbps: 0
+      power:
+        cpu_model: linear
+        cpu_idle_w: 100
+        cpu_max_w: 300
+        gpu_idle_w: 50
+        gpu_max_w: 300
+        base_w: 200
+        source: "PLACEHOLDER values, not measured. Candidates to check: V100 rated maximum 250 W (PCIe) or 300 W (SXM2) per NVIDIA's datasheet; CPU idle/max from a SPECpower result for the actual server"
+energy:
+  pue: 1.54
+  pue_source: "Uptime Institute Global Data Center Survey 2025, global average, as cited in the architecture document"
+  grid_g_co2_per_kwh: 727
+  grid_source: "CEA CO2 Baseline Database v20.0, India FY 2023-24 weighted average, as cited in the architecture document"
+workload:
+  generator:
+    name: poisson
+    params: { jobs_per_hour: 2.25, jobs: 1500, source: resample, resample_csv: ../synergy-replica/jobs.csv }
+  labeller: { name: from_trace }
+  measure: { from_job: 500, to_job: 1199 }
+models:
+  profiles_dir: ../profiles/synergy-v100/models
+  scaling: linear
+  throughput_mode: synergy_two_point
+  locality_penalty: 1.0
+candidates:
+  - name: fifo-fair
+    trigger:    { name: periodic, params: { round_s: 300 } }
+    ordering:   { name: fifo }
+    allocation: { name: gpu_proportional }
+    placement:  { name: first_fit }
+    lifecycle:  { name: round_based }
+  - name: fifo-greedy
+    trigger:    { name: periodic, params: { round_s: 300 } }
+    ordering:   { name: fifo }
+    allocation: { name: synergy_greedy }
+    placement:  { name: first_fit }
+    lifecycle:  { name: round_based }
+  - name: fifo-tune
+    trigger:    { name: periodic, params: { round_s: 300 } }
+    ordering:   { name: fifo }
+    allocation: { name: synergy_tune }
+    placement:  { name: first_fit }
+    lifecycle:  { name: round_based }
+  - name: srtf-tune
+    trigger:    { name: periodic, params: { round_s: 300 } }
+    ordering:   { name: srtf }
+    allocation: { name: synergy_tune }
+    placement:  { name: first_fit }
+    lifecycle:  { name: round_based }
+seeds: [1, 2, 3, 4, 5]
+sweeps:
+  # More cores per server also needs profiles normalised to that server's fixed share (Synergy's models-4 = 32 cores).
+  - name: cpus
+    paths: [cluster.server_groups.0.cpus, models.profiles_dir]
+    values: [[24, ../profiles/synergy-v100/models], [32, ../profiles/synergy-v100/models-4]]
+report:
+  objectives:
+    - { metric: mean_jct_h, weight: 2 }
+    - { metric: p99_jct_h, weight: 1 }
+    - { metric: kwh_per_job, weight: 1 }
+output_dir: ../../out/decision-demo

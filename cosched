@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Runs an experiment YAML (all candidates x seeds x sweeps) and writes its decision report.
+#   ./cosched presets/decision-demo/decision-demo.yaml
+# Builds the project first if it has not been built (needs only Java 21: Maven comes from ./mvnw).
+set -euo pipefail
+if [ $# -ne 1 ]; then echo "usage: ./cosched <experiment.yaml>" >&2; exit 1; fi
+yaml="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+cd "$(dirname "$0")"
+mod=modules/cloudsim-cosched
+stamp="$mod/target/.cosched-built"
+if [ ! -f "$stamp" ] || [ -n "$(find pom.xml modules/cloudsim-gpu modules/cloudsim-cosched -path '*/target' -prune -o -newer "$stamp" -type f -print -quit)" ]; then
+  echo "building..." >&2
+  ./mvnw -q install -DskipTests -pl modules/cloudsim-cosched -am
+  touch "$stamp"
+fi
+if [ ! -f "$mod/target/cp.txt" ] || [ "$mod/pom.xml" -nt "$mod/target/cp.txt" ]; then
+  ./mvnw -q -pl "$mod" dependency:build-classpath -Dmdep.outputFile=target/cp.txt
+fi
+exec java -Xmx3g -cp "$mod/target/classes:$(cat "$mod/target/cp.txt")" \
+  org.cloudbus.cloudsim.cosched.metrics.ComparisonRunner "$yaml"

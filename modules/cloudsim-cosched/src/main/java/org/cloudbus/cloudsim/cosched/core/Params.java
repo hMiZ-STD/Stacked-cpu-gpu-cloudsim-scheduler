@@ -39,6 +39,32 @@ public final class Params {
         return d;
     }
 
+    /** A number the YAML must give: there is no sensible default (e.g. a workload's load). */
+    public double requireDouble(String key, double min, double max) {
+        if (raw.get(key) == null) throw bad(key, "is required");
+        return getDouble(key, 0, min, max);
+    }
+
+    /** An integer the YAML must give. */
+    public int requireInt(String key, int min, int max) {
+        if (raw.get(key) == null) throw bad(key, "is required");
+        return getInt(key, 0, min, max);
+    }
+
+    /** A free-text value (e.g. a file path), or {@code def} (may be null) when absent. */
+    public String getString(String key, String def) {
+        Object v = raw.get(key);
+        if (v != null && !(v instanceof String)) throw bad(key, "must be text, got '" + v + "'");
+        String s = v == null ? def : (String) v;
+        if (s != null) resolved.put(key, s);
+        return s;
+    }
+
+    /** True if the YAML set this key. */
+    public boolean has(String key) {
+        return raw.containsKey(key);
+    }
+
     public int getInt(String key, int def, int min, int max) {
         Object v = raw.get(key);
         int i;

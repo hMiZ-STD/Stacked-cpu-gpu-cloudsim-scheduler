@@ -21,6 +21,7 @@ public record Profile(
         @JsonProperty("gpu_type") String gpuType,
         @JsonProperty("gpu_count") int gpuCount,
         @JsonProperty("iter_time_s") double iterTimeS,
+        @JsonProperty("batch_size") Integer batchSize,
         @JsonProperty("ideal_cpus_per_gpu") double idealCpusPerGpu,
         @JsonProperty("ideal_mem_gb_per_gpu") double idealMemGbPerGpu,
         @JsonProperty("ideal_storage_speed_per_gpu") Double idealStorageSpeedPerGpu,
@@ -38,6 +39,7 @@ public record Profile(
         require(gpuType != null && !gpuType.isBlank(), id, "gpu_type is required");
         require(gpuCount > 0, id, "gpu_count must be > 0");
         require(iterTimeS > 0, id, "iter_time_s must be > 0");
+        require(batchSize == null || batchSize > 0, id, "batch_size must be > 0");
         require(idealCpusPerGpu > 0 && idealMemGbPerGpu > 0, id, "ideal demand must be > 0");
         require(idealSpeedup > 0, id, "ideal_speedup must be > 0");
         require(placementPenalty > 0 && placementPenalty <= 1, id, "placement_penalty must be in (0, 1]");
